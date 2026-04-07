@@ -1,1 +1,0 @@
-- [Go Korean Comment Convention](go_korean_comment_convention.md) — Exported 심볼 주석은 "심볼명 + 공백 + 조사" 형식 필수
