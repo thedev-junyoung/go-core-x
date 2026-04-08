@@ -67,7 +67,7 @@ func newBenchInfra() (*appingestion.IngestionService, func()) {
 		Processor:     domain.EventProcessorFunc(func(e *domain.Event) {}), // no-op
 		EventPool:     ep,
 	})
-	svc := appingestion.NewIngestionService(wp, ep)
+	svc := appingestion.NewIngestionService(wp, ep, nil) // nil for WALWriter (benchmark only)
 
 	cleanup := func() {
 		wp.Shutdown(context.Background())
