@@ -132,6 +132,28 @@ func main() {
 		EventPool:     eventPool,
 	})
 
+	// --- Crash Recovery (크래시 복구) ------------------------------------------
+	// Phase 2의 핵심: 이전 실행에서 기록된 모든 이벤트를 자동으로 복구한다.
+	// 절차:
+	//   1. WAL 파일 존재 확인
+	//   2. reader.Scan() 루프로 모든 완전한 레코드 읽기
+	//   3. 각 이벤트를 workerPool에 재전송 (WAL에 다시 기록하지 않음)
+	//   4. ErrTruncated: 정상 처리 (마지막 불완전한 레코드는 버림)
+	//   5. ErrCorrupted/ErrChecksumMismatch: fatal 에러 (서버 기동 중단)
+	//
+	// 왜 workerPool.Submit을 사용하는가?
+	//   - IngestionService.Ingest()는 이벤트를 WAL에 기록한다.
+	//   - 복구 경로에서는 이미 WAL에 기록된 이벤트이므로 다시 기록할 필요가 없다.
+	//   - workerPool.Submit()은 순수 큐 역할을 하므로 중복 기록을 피할 수 있다.
+	recoveredCount, err := recoverWALEvents(walPath, workerPool)
+	if err != nil {
+		slog.Error("crash recovery failed", "wal_path", walPath, "err", err)
+		os.Exit(1)
+	}
+	if recoveredCount > 0 {
+		slog.Info("crash recovery completed", "recovered_count", recoveredCount)
+	}
+
 	// --- 애플리케이션 계층 (Application Layer) --------------------------------
 	// IngestionService는 Ingest 유스케이스를 소유한다.
 	// concrete 인프라 타입이 아닌 포트(인터페이스)에 의존하므로
@@ -248,4 +270,80 @@ func envInt(key string, fallback int) int {
 		slog.Warn("invalid integer env var, using fallback", "key", key, "fallback", fallback)
 	}
 	return fallback
+}
+
+// recoverWALEvents는 기존 WAL 파일에서 모든 완전한 레코드를 읽어
+// submitter(workerPool)에 이벤트를 재전송한다.
+//
+// 반환값: (복구된 이벤트 개수, 에러)
+// - 파일이 없으면 0개 복구로 간주하고 nil 반환 (정상)
+// - ErrTruncated: 정상 처리 (마지막 불완전한 레코드는 버림)
+// - ErrCorrupted/ErrChecksumMismatch: fatal 에러 (nil이 아닌 값 반환)
+//
+// 복구 절차:
+//   1. WAL 파일 존재 확인
+//   2. wal.NewReader로 파일 열기
+//   3. reader.Scan() 루프: 완전한 레코드 읽기 → DecodeEvent → submitter.Submit
+//   4. 에러 분류:
+//      - ErrTruncated: 정상 (마지막 이벤트 버려짐)
+//      - 그 외: fatal 에러로 반환
+func recoverWALEvents(walPath string, submitter appingestion.Submitter) (int, error) {
+	// 파일이 없으면 복구할 것이 없음
+	if _, err := os.Stat(walPath); os.IsNotExist(err) {
+		// 파일이 없는 것은 정상 (첫 시작, 또는 정리됨)
+		slog.Debug("no wal file found, skipping recovery", "path", walPath)
+		return 0, nil
+	}
+
+	// WAL 리더 열기
+	reader, err := wal.NewReader(walPath)
+	if err != nil {
+		return 0, err
+	}
+	defer reader.Close()
+
+	slog.Info("starting crash recovery from wal file", "path", walPath)
+
+	recoveredCount := 0
+	for reader.Scan() {
+		record := reader.Record()
+
+		// 레코드 디코딩
+		decodedEvent, err := wal.DecodeEvent(record.Data)
+		if err != nil {
+			// 디코딩 실패는 데이터 손상으로 간주
+			return recoveredCount, err
+		}
+
+		// ReceivedAt 복원: WAL 레코드의 Timestamp 사용
+		decodedEvent.ReceivedAt = record.Timestamp
+
+		// 이벤트를 워커풀에 재전송 (WAL에 다시 기록하지 않음)
+		// Submit이 false를 반환하면 버퍼가 가득 찼다는 의미이지만,
+		// 복구 경로에서는 이 상황이 발생하지 않아야 한다 (싱글 스레드 복구).
+		if !submitter.Submit(decodedEvent) {
+			// 이론적으로 발생하지 않아야 하지만, 로깅만 하고 계속 진행
+			slog.Warn("event submission failed during recovery, buffer full", "recovered", recoveredCount)
+		}
+
+		// 풀에서 가져온 이벤트는 워커가 처리한 후 자동 반환됨
+		// (WorkerPool이 처리 완료 후 eventPool에 반환)
+
+		recoveredCount++
+	}
+
+	// 에러 확인
+	if err := reader.Err(); err != nil {
+		// ErrTruncated: 정상 처리 (마지막 불완전한 레코드)
+		if err == wal.ErrTruncated {
+			slog.Info("wal file truncated at end, last incomplete record skipped",
+				"recovered_count", recoveredCount)
+			return recoveredCount, nil
+		}
+
+		// ErrCorrupted, ErrChecksumMismatch: fatal 에러
+		return recoveredCount, err
+	}
+
+	return recoveredCount, nil
 }
