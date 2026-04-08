@@ -15,6 +15,7 @@ package wal
 import (
 	"encoding/binary"
 	"hash/crc32"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -78,6 +79,7 @@ type Config struct {
 //   - file: O_APPEND 모드로 열린 파일 디스크립터.
 //   - mu: Write() 호출의 원자성을 보장하는 뮤텍스.
 //   - cfg: 설정 (SyncPolicy, SyncInterval).
+//   - bufPool: Write() 경로의 record 버퍼 재사용 (zero-alloc).
 //
 // SyncInterval 정책용 필드:
 //   - syncDone: 백그라운드 fsync 고루틴에 종료 신호를 보내는 채널.
@@ -86,6 +88,10 @@ type Writer struct {
 	file *os.File
 	mu   sync.Mutex
 	cfg  Config
+
+	// bufPool은 Write() 경로의 record 버퍼를 재사용한다.
+	// Get()으로 *[]byte를 꺼내고 사용 후 Put()으로 반환한다.
+	bufPool sync.Pool
 
 	// SyncInterval 정책용 필드
 	syncDone chan struct{}
@@ -111,6 +117,14 @@ func NewWriter(cfg Config) (*Writer, error) {
 	w := &Writer{
 		file: f,
 		cfg:  cfg,
+		bufPool: sync.Pool{
+			New: func() any {
+				// 초기 용량: 헤더(16) + 일반적인 페이로드(256) + 체크섬(4)
+				// 실제 payload가 크면 Write() 내에서 grow된다.
+				b := make([]byte, 0, RecordHeaderSize+256+RecordChecksumSize)
+				return &b  // *[]byte 저장 (boxing alloc 방지)
+			},
+		},
 	}
 
 	// SyncInterval 정책이면 백그라운드 fsync 고루틴 시작.
@@ -125,13 +139,15 @@ func NewWriter(cfg Config) (*Writer, error) {
 // Write는 이벤트를 바이너리 프로토콜에 따라 기록한다.
 //
 // 절차:
-//   1. 헤더 작성: Magic + Timestamp + Size
+//   1. 헤더 작성: Magic + Timestamp + Size (스택 배열, 0 alloc)
 //   2. Payload 작성
-//   3. CRC32 체크섬 계산 및 작성
+//   3. CRC32 체크섬 계산 (pool 버퍼 사용, 0 alloc on pool hit)
 //   4. SyncPolicy에 따라 fsync 호출:
 //      - SyncImmediate: 즉시 fsync
 //      - SyncInterval: 백그라운드 고루틴이 주기적으로 처리 (Write 경로는 fsync 미포함)
 //      - SyncNever: fsync 호출 안 함
+//
+// 성능: SyncNever 정책일 때 pool 히트 시 0 allocs/op.
 //
 // 동시성: mu로 보호됨 (여러 고루틴에서 동시 호출 안전).
 //
@@ -140,28 +156,43 @@ func (w *Writer) Write(payload []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// 헤더: Magic (4) + Timestamp (8) + Size (4)
-	header := make([]byte, RecordHeaderSize)
+	// 헤더: [Magic:4][Timestamp:8][Size:4] = 16 bytes (스택 배열)
+	var header [RecordHeaderSize]byte
 	binary.BigEndian.PutUint32(header[0:4], MagicNumber)
 	binary.BigEndian.PutUint64(header[4:12], uint64(time.Now().UnixNano()))
 	binary.BigEndian.PutUint32(header[12:16], uint32(len(payload)))
 
-	// 전체 레코드 데이터 (체크섬 제외).
-	record := make([]byte, 0, len(header)+len(payload)+RecordChecksumSize)
-	record = append(record, header...)
-	record = append(record, payload...)
+	// record 버퍼: pool에서 획득
+	bp := w.bufPool.Get().(*[]byte)
+	buf := (*bp)[:0] // 길이를 0으로 리셋, 용량은 유지
 
-	// CRC32 체크섬 계산.
-	checksum := crc32.ChecksumIEEE(record)
-
-	// 파일에 기록: 레코드 + 체크섬.
-	if _, err := w.file.Write(record); err != nil {
-		return err
+	// 필요한 크기 확인
+	needed := RecordHeaderSize + len(payload) + RecordChecksumSize
+	if cap(buf) < needed {
+		// 용량 부족 시 grow (이 경우만 alloc 발생)
+		buf = make([]byte, 0, needed)
 	}
 
-	checksumBuf := make([]byte, RecordChecksumSize)
-	binary.BigEndian.PutUint32(checksumBuf, checksum)
-	if _, err := w.file.Write(checksumBuf); err != nil {
+	// 헤더 + 페이로드를 버퍼에 누적
+	buf = append(buf, header[:]...)
+	buf = append(buf, payload...)
+
+	// CRC32 체크섬: 헤더 + 페이로드 범위에 대해 계산
+	checksum := crc32.ChecksumIEEE(buf)
+
+	// 체크섬: 고정 4B 스택 배열
+	var checksumBytes [RecordChecksumSize]byte
+	binary.BigEndian.PutUint32(checksumBytes[0:4], checksum)
+	buf = append(buf, checksumBytes[:]...)
+
+	// Single Write syscall (이전: 2회 → 현재: 1회)
+	_, err := w.file.Write(buf)
+
+	// pool에 버퍼 반환 (에러 여부와 관계없이)
+	*bp = buf
+	w.bufPool.Put(bp)
+
+	if err != nil {
 		return err
 	}
 
@@ -180,10 +211,60 @@ func (w *Writer) Write(payload []byte) error {
 // WriteEvent는 Event를 바이너리 프로토콜에 따라 기록한다.
 //
 // application/ingestion.WALWriter 포트를 구현한다.
-// Event를 내부적으로 바이너리로 encode한 후 Write()를 호출한다.
+// Event를 pool 버퍼에 직접 encode하여 EncodeEvent() 중간 할당을 제거한다.
+//
+// 성능: 0 allocs/op (pool 히트 시, SyncNever 정책)
 func (w *Writer) WriteEvent(e *domain.Event) error {
-	payload := EncodeEvent(e)
-	return w.Write(payload)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// 인코딩된 이벤트의 크기 사전 계산
+	payloadSize := encodedEventSize(e)
+
+	// 헤더: [Magic:4][Timestamp:8][Size:4] (스택 배열)
+	var header [RecordHeaderSize]byte
+	binary.BigEndian.PutUint32(header[0:4], MagicNumber)
+	binary.BigEndian.PutUint64(header[4:12], uint64(time.Now().UnixNano()))
+	binary.BigEndian.PutUint32(header[12:16], uint32(payloadSize))
+
+	// record 버퍼: pool에서 획득
+	bp := w.bufPool.Get().(*[]byte)
+	buf := (*bp)[:0]
+
+	needed := RecordHeaderSize + payloadSize + RecordChecksumSize
+	if cap(buf) < needed {
+		buf = make([]byte, 0, needed)
+	}
+
+	// 헤더 + 이벤트 데이터를 버퍼에 누적
+	buf = append(buf, header[:]...)
+	buf = appendEncodeEventInto(buf, e) // 0 alloc (pool 내부 encoding)
+
+	// CRC32 체크섬
+	checksum := crc32.ChecksumIEEE(buf)
+
+	// 체크섬 append (스택 배열)
+	var checksumBytes [RecordChecksumSize]byte
+	binary.BigEndian.PutUint32(checksumBytes[0:4], checksum)
+	buf = append(buf, checksumBytes[:]...)
+
+	// Single Write syscall
+	_, err := w.file.Write(buf)
+
+	// pool에 반환
+	*bp = buf
+	w.bufPool.Put(bp)
+
+	if err != nil {
+		return err
+	}
+
+	// SyncImmediate 정책
+	if w.cfg.SyncPolicy == SyncImmediate {
+		return w.file.Sync()
+	}
+
+	return nil
 }
 
 // Sync는 명시적 fsync 호출을 강제한다.
@@ -232,6 +313,7 @@ func (w *Writer) Close() error {
 // 동작:
 //   - 주기적으로 ticker 신호를 받으면 Sync() 호출.
 //   - syncDone 채널 닫히면 즉시 루프 종료.
+//   - fsync 실패 시 slog.Error로 기록 (운영 가시성 확보).
 //
 // 뮤텍스 획득:
 //   Sync() 호출 시 mu를 획득하므로 Write()와 경쟁하지 않음.
@@ -251,7 +333,15 @@ func (w *Writer) startSyncTicker() {
 				return
 			case <-ticker.C:
 				// 주기 만료 — fsync 호출 (뮤텍스로 보호됨).
-				_ = w.Sync() // 에러 무시 (배경 작업이므로 silent fail)
+				if err := w.Sync(); err != nil {
+					// 배경 고루틴에서 fsync 실패 — 운영자에게 가시적으로 알림.
+					// 에러가 발생해도 고루틴은 계속 실행한다 (self-healing).
+					// 반복적 실패는 스토리지 장애를 의미하므로 모니터링 시스템이 감지해야 한다.
+					slog.Error("wal: background fsync failed",
+						"path", w.cfg.Path,
+						"error", err,
+					)
+				}
 			}
 		}
 	}()
