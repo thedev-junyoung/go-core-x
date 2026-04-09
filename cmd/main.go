@@ -46,6 +46,7 @@ import (
 	"github.com/junyoung/core-x/internal/infrastructure/executor"
 	infrahttp "github.com/junyoung/core-x/internal/infrastructure/http"
 	"github.com/junyoung/core-x/internal/infrastructure/pool"
+	kvstore "github.com/junyoung/core-x/internal/infrastructure/storage/kv"
 	"github.com/junyoung/core-x/internal/infrastructure/storage/wal"
 )
 
@@ -105,6 +106,17 @@ func main() {
 	}
 	slog.Info("wal writer initialized", "path", walPath, "sync_policy", "interval_100ms")
 
+	// --- 인프라: KV Store (Infrastructure: KV Store) -------------------------
+	// Phase 2: Hash Index + WAL = Bitcask model KV store.
+	// KVStore implements application/ingestion.WALWriter (WriteEvent).
+	// IngestionService.Ingest() → kvStore.WriteEvent() → WAL write + index update.
+	kvStore, err := kvstore.NewStore(walWriter, walPath, 1_000_000)
+	if err != nil {
+		slog.Error("failed to create kv store", "path", walPath, "err", err)
+		os.Exit(1)
+	}
+	slog.Info("kv store initialized", "path", walPath, "max_keys", 1_000_000)
+
 	// --- 인프라: 풀 (Infrastructure: Pool) ----------------------------------
 	// sync.Pool 기반 Event 재활용기. 풀 히트 시 0 할당. (ADR-003)
 	eventPool := pool.New()
@@ -133,33 +145,47 @@ func main() {
 	})
 
 	// --- Crash Recovery (크래시 복구) ------------------------------------------
-	// Phase 2의 핵심: 이전 실행에서 기록된 모든 이벤트를 자동으로 복구한다.
-	// 절차:
-	//   1. WAL 파일 존재 확인
-	//   2. reader.Scan() 루프로 모든 완전한 레코드 읽기
-	//   3. 각 이벤트를 workerPool에 재전송 (WAL에 다시 기록하지 않음)
-	//   4. ErrTruncated: 정상 처리 (마지막 불완전한 레코드는 버림)
-	//   5. ErrCorrupted/ErrChecksumMismatch: fatal 에러 (서버 기동 중단)
+	// Phase 2의 핵심: KV Store의 Hash Index를 WAL 재생으로 재구축.
+	// 동시에 recovered 이벤트를 workerPool에 재전송하여 처리 복구도 진행.
 	//
-	// 왜 workerPool.Submit을 사용하는가?
-	//   - IngestionService.Ingest()는 이벤트를 WAL에 기록한다.
-	//   - 복구 경로에서는 이미 WAL에 기록된 이벤트이므로 다시 기록할 필요가 없다.
-	//   - workerPool.Submit()은 순수 큐 역할을 하므로 중복 기록을 피할 수 있다.
-	recoveredCount, err := recoverWALEvents(walPath, workerPool)
+	// 절차:
+	//   1. kvStore.Recover(callback) → WAL 전체 스캔
+	//   2. 각 레코드: index 재구축 + callback 호출
+	//   3. callback: workerPool.Submit(e) → 이벤트 처리 재진행
+	//   4. ErrTruncated: 정상 처리 (마지막 불완전 레코드는 버림)
+	//   5. ErrCorrupted/ErrChecksumMismatch: fatal 에러
+	//
+	// 오프라인 복구 보증:
+	//   - kvStore.Recover는 index rebuild만 담당 (WAL에 다시 기록하지 않음)
+	//   - callback으로 workerPool.Submit을 전달하면 처리 복구도 함께 진행
+	//   - 콜백 패턴으로 계층 위반 없음 (kv ← application/executor)
+	recoveredCount, err := kvStore.Recover(func(e *domain.Event) {
+		// Recovered event: already in WAL, just submit to worker for processing
+		if !workerPool.Submit(e) {
+			// Theoretically should not happen during recovery (single-threaded)
+			slog.Warn("recovered event submission failed", "source", e.Source)
+		}
+	})
 	if err != nil {
 		slog.Error("crash recovery failed", "wal_path", walPath, "err", err)
 		os.Exit(1)
 	}
 	if recoveredCount > 0 {
-		slog.Info("crash recovery completed", "recovered_count", recoveredCount)
+		slog.Info("crash recovery completed",
+			"recovered_count", recoveredCount,
+			"index_size", kvStore.Len(),
+		)
 	}
 
 	// --- 애플리케이션 계층 (Application Layer) --------------------------------
 	// IngestionService는 Ingest 유스케이스를 소유한다.
 	// concrete 인프라 타입이 아닌 포트(인터페이스)에 의존하므로
 	// 실제 풀이나 executor 없이도 테스트 가능하다.
-	// walWriter는 WALWriter 포트를 만족한다: WriteEvent(e *domain.Event) error
-	svc := appingestion.NewIngestionService(workerPool, eventPool, walWriter)
+	//
+	// Phase 2 변경: kvStore가 WALWriter 포트를 구현한다.
+	// IngestionService.Ingest() → kvStore.WriteEvent() → WAL 기록 + index 업데이트.
+	// KVStore는 내부적으로 walWriter를 사용하여 투명하게 WAL 기록 + index를 처리한다.
+	svc := appingestion.NewIngestionService(workerPool, eventPool, kvStore)
 
 	// --- HTTP 라우터 (HTTP Router) -------------------------------------------
 	// 순수 stdlib ServeMux. 미들웨어 프레임워크 없음.
@@ -228,9 +254,19 @@ func main() {
 			slog.Info("wal writer flushed and closed")
 		}
 
+		// Step 2.5: KV Store read handle을 닫는다.
+		// kvStore는 read-only 파일 핸들을 보유하므로 명시적으로 닫아야 함.
+		// walWriter.Close() 이후이므로 새 WriteEvent() 호출은 없고,
+		// 모든 새 Get() 호출도 없다 (HTTP 서버가 이미 shutdown).
+		if err := kvStore.Close(); err != nil {
+			slog.Error("kv store close error", "err", err)
+		} else {
+			slog.Info("kv store closed")
+		}
+
 		// Step 3: jobCh를 닫고 모든 worker가 드레인·종료할 때까지 대기.
 		// server.Shutdown 이후이므로 Submit()이 닫힌 채널로 전송하는 경쟁이 없다.
-		// WAL이 이미 닫혔으므로 Worker 처리 결과는 이미 영속화된 상태다.
+		// WAL과 kvStore가 이미 닫혔으므로 Worker 처리 결과는 이미 영속화된 상태다.
 		workerPool.Shutdown(ctx)
 	}()
 
@@ -272,78 +308,3 @@ func envInt(key string, fallback int) int {
 	return fallback
 }
 
-// recoverWALEvents는 기존 WAL 파일에서 모든 완전한 레코드를 읽어
-// submitter(workerPool)에 이벤트를 재전송한다.
-//
-// 반환값: (복구된 이벤트 개수, 에러)
-// - 파일이 없으면 0개 복구로 간주하고 nil 반환 (정상)
-// - ErrTruncated: 정상 처리 (마지막 불완전한 레코드는 버림)
-// - ErrCorrupted/ErrChecksumMismatch: fatal 에러 (nil이 아닌 값 반환)
-//
-// 복구 절차:
-//   1. WAL 파일 존재 확인
-//   2. wal.NewReader로 파일 열기
-//   3. reader.Scan() 루프: 완전한 레코드 읽기 → DecodeEvent → submitter.Submit
-//   4. 에러 분류:
-//      - ErrTruncated: 정상 (마지막 이벤트 버려짐)
-//      - 그 외: fatal 에러로 반환
-func recoverWALEvents(walPath string, submitter appingestion.Submitter) (int, error) {
-	// 파일이 없으면 복구할 것이 없음
-	if _, err := os.Stat(walPath); os.IsNotExist(err) {
-		// 파일이 없는 것은 정상 (첫 시작, 또는 정리됨)
-		slog.Debug("no wal file found, skipping recovery", "path", walPath)
-		return 0, nil
-	}
-
-	// WAL 리더 열기
-	reader, err := wal.NewReader(walPath)
-	if err != nil {
-		return 0, err
-	}
-	defer reader.Close()
-
-	slog.Info("starting crash recovery from wal file", "path", walPath)
-
-	recoveredCount := 0
-	for reader.Scan() {
-		record := reader.Record()
-
-		// 레코드 디코딩
-		decodedEvent, err := wal.DecodeEvent(record.Data)
-		if err != nil {
-			// 디코딩 실패는 데이터 손상으로 간주
-			return recoveredCount, err
-		}
-
-		// ReceivedAt 복원: WAL 레코드의 Timestamp 사용
-		decodedEvent.ReceivedAt = record.Timestamp
-
-		// 이벤트를 워커풀에 재전송 (WAL에 다시 기록하지 않음)
-		// Submit이 false를 반환하면 버퍼가 가득 찼다는 의미이지만,
-		// 복구 경로에서는 이 상황이 발생하지 않아야 한다 (싱글 스레드 복구).
-		if !submitter.Submit(decodedEvent) {
-			// 이론적으로 발생하지 않아야 하지만, 로깅만 하고 계속 진행
-			slog.Warn("event submission failed during recovery, buffer full", "recovered", recoveredCount)
-		}
-
-		// 풀에서 가져온 이벤트는 워커가 처리한 후 자동 반환됨
-		// (WorkerPool이 처리 완료 후 eventPool에 반환)
-
-		recoveredCount++
-	}
-
-	// 에러 확인
-	if err := reader.Err(); err != nil {
-		// ErrTruncated: 정상 처리 (마지막 불완전한 레코드)
-		if err == wal.ErrTruncated {
-			slog.Info("wal file truncated at end, last incomplete record skipped",
-				"recovered_count", recoveredCount)
-			return recoveredCount, nil
-		}
-
-		// ErrCorrupted, ErrChecksumMismatch: fatal 에러
-		return recoveredCount, err
-	}
-
-	return recoveredCount, nil
-}

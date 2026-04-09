@@ -36,6 +36,13 @@
      └──────────┬──────────┘                │
                 │                           │
                 ▼                           ▼
+     ┌──────────────────────────────┐
+     │ Validate & Record (ADR)      │
+     │ □ Design Approved by User    │
+     │ □ ADR written to docs/adr/   │
+     └────────────┬─────────────────┘
+                  │
+                  ▼
     ┌──────────────────────────────┐    request architect
     │ @superpowers:writing-plans   │    again with feedback
     │ Input: design proposal       │
@@ -135,30 +142,38 @@ Task 1: WAL Writer Design & Implementation
 │  └─ docs/WAL_DESIGN.md
 └─ Status: ✅ COMPLETE
 
-Task 2: WAL Reader Design (in progress)
+Task 2: WAL Reader Design & Implementation
 ├─ Input:  (Problem definition) ✅
 ├─ Agent:  principal-architect (design received) ✅
 ├─ Output:
-│  ├─ internal/infrastructure/storage/wal/errors.go (planned)
-│  ├─ internal/infrastructure/storage/wal/reader.go (planned)
-│  ├─ test/wal_reader_test.go (8 cases) (planned)
-│  └─ docs/WAL_READER_DESIGN.md (planned)
-└─ Status: ⏳ IN PROGRESS
+│  ├─ internal/infrastructure/storage/wal/errors.go ✅
+│  ├─ internal/infrastructure/storage/wal/reader.go ✅
+│  ├─ internal/infrastructure/storage/wal/reader_test.go ✅
+│  └─ docs/adr/0004-wal-reader-design.md ✅
+└─ Status: ✅ COMPLETE
 
-Task 3: Integration & E2E Tests
-├─ Input:  (Reader completion)
+Task 3: Hash Index KV Store (Bitcask Model)
+├─ Input:  (WAL Reader completion) ✅
+├─ Agent:  principal-architect ✅
+├─ Output:
+│  ├─ internal/infrastructure/storage/kv/ ✅
+│  └─ docs/adr/0005-hash-index-kv-store-bitcask.md ✅
+└─ Status: ✅ COMPLETE
+
+Task 4: Integration & E2E Tests
+├─ Input:  (KV Store completion)
 ├─ Agent:  (TBD)
 ├─ Output:
 │  ├─ cmd/main.go modification (replay logic)
 │  ├─ test/e2e_crash_simulation_test.go
 │  └─ docs/OPERATION.md
-└─ Status: ⏳ BLOCKED (waiting Task 2)
+└─ Status: ⏳ BLOCKED (waiting Task 3)
 
-Task 4: Documentation
+Task 5: Documentation
 ├─ Input:  (All implementation complete)
 ├─ Agent:  (Direct writing)
 ├─ Output:
-│  ├─ README: WAL section
+│  ├─ README: WAL + KV section
 │  ├─ ARCHITECTURE.md: Phase 2 summary
 │  ├─ GOTCHAS.md: caveats and limitations
 │  └─ OPERATION.md: operations guide
@@ -254,6 +269,7 @@ Documentation
 □ ARCHITECTURE.md written (design decisions documented)
 □ GOTCHAS.md written (limitations and caveats)
 □ OPERATION.md written (operations guide)
+□ ADR for every major architectural change is recorded in docs/adr/
 □ All functions have comments (domain/app/infra separation explained)
 
 Performance
@@ -288,21 +304,18 @@ All pass → Phase 2 complete + commit
 ```
 You are here:
 
-Phase 2, Task 2 (WAL Reader)
-├─ ✅ Design proposal received
-├─ ⏳ Here: "Proceed with implementation?"
-├─ ⏳ Next: Create implementation plan (writing-plans)
-└─ ⏳ Then: TDD → implement → review → verify
+Phase 2, Task 4 (Integration & E2E Tests)
+├─ ✅ WAL Writer: complete
+├─ ✅ WAL Reader: complete
+├─ ✅ Hash Index KV Store (Bitcask): complete
+├─ ⏳ Here: Integration & E2E Tests
+└─ ⏳ Next: Documentation → Phase 2 complete
 
-After approval:
-
-1. Use AGENTS.md + AGENT_RULES.md + WORKFLOW.md to guide each step
-2. principal-architect only for design
-3. Implementation via TDD order
-4. Code review after each part
-5. Final verification before Phase complete
-
-Repeat same pattern for Phase 3, 4, etc.
+Next steps:
+1. cmd/main.go에 Recover() 연동 (crash recovery replay)
+2. e2e_crash_simulation_test.go 작성
+3. OPERATION.md, ARCHITECTURE.md, GOTCHAS.md 작성
+4. Phase 2 completion checklist 통과 → commit
 ```
 
 ---

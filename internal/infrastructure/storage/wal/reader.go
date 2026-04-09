@@ -201,6 +201,82 @@ func validateMagic(magic uint32) error {
 	return nil
 }
 
+// ReadRecordAt reads a single complete WAL record at a specific file offset.
+//
+// This is used by the KV Store (Phase 2) for random access to WAL records.
+// Unlike Scan() which uses buffered I/O, ReadRecordAt uses os.File.ReadAt for direct offset access.
+//
+// Parameters:
+//   - f: open file handle (must support ReadAt)
+//   - offset: byte offset within the file where the record starts
+//
+// Returns (record, nil) on success, (empty, error) on failure.
+// Errors:
+//   - io.EOF: offset points past end of file
+//   - io.ErrUnexpectedEOF: incomplete record (partial header/payload/checksum)
+//   - ErrCorrupted: invalid magic number
+//   - ErrChecksumMismatch: CRC32 validation failed
+func ReadRecordAt(f *os.File, offset int64) (Record, error) {
+	// Read header: Magic(4) + Timestamp(8) + Size(4) = 16 bytes
+	headerBuffer := make([]byte, RecordHeaderSize)
+	n, err := f.ReadAt(headerBuffer, offset)
+	if err != nil {
+		if err == io.EOF && n == 0 {
+			return Record{}, io.EOF
+		}
+		if err == io.EOF || n < RecordHeaderSize {
+			return Record{}, ErrTruncated
+		}
+		return Record{}, err
+	}
+
+	// Parse header
+	magic := binary.BigEndian.Uint32(headerBuffer[0:4])
+	timestampNano := binary.BigEndian.Uint64(headerBuffer[4:12])
+	payloadSize := binary.BigEndian.Uint32(headerBuffer[12:16])
+
+	// Validate magic
+	if magicValidationError := validateMagic(magic); magicValidationError != nil {
+		return Record{}, magicValidationError
+	}
+
+	// Read payload
+	payloadBuffer := make([]byte, payloadSize)
+	n, err = f.ReadAt(payloadBuffer, offset+int64(RecordHeaderSize))
+	if err != nil {
+		if err == io.EOF || n < int(payloadSize) {
+			return Record{}, ErrTruncated
+		}
+		return Record{}, err
+	}
+
+	// Read checksum (4 bytes)
+	checksumBuffer := make([]byte, RecordChecksumSize)
+	n, err = f.ReadAt(checksumBuffer, offset+int64(RecordHeaderSize)+int64(payloadSize))
+	if err != nil {
+		if err == io.EOF || n < RecordChecksumSize {
+			return Record{}, ErrTruncated
+		}
+		return Record{}, err
+	}
+
+	storedChecksum := binary.BigEndian.Uint32(checksumBuffer)
+
+	// Verify checksum: computed over header + payload
+	computedChecksum := crc32.ChecksumIEEE(headerBuffer)
+	computedChecksum = crc32.Update(computedChecksum, crc32.IEEETable, payloadBuffer)
+
+	if computedChecksum != storedChecksum {
+		return Record{}, ErrChecksumMismatch
+	}
+
+	// Return valid record
+	return Record{
+		Timestamp: time.Unix(0, int64(timestampNano)),
+		Data:      payloadBuffer,
+	}, nil
+}
+
 // DecodeEvent reconstructs a domain.Event from WAL payload bytes.
 // This reverses the encoding done by EncodeEvent in encode.go.
 //

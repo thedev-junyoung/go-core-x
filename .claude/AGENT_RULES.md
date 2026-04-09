@@ -154,24 +154,34 @@ Before invoking, verify:
 
 ---
 
-## Rule 6: Mandatory Agent Order
+---
+
+## Rule 6: Mandatory Agent Order & ADR Enforcement
+
+### 🛡️ The ADR Hand-off (CRITICAL)
+Before transitioning from 'Design' (Architect) to 'Implementation' (Plans/TDD), the agent must ensure:
+- **Traceability**: A corresponding ADR file must be created or updated in `docs/adr/`.
+- **Persistence**: Key trade-offs and decisions must be summarized in the ADR before the planning agent starts decomposing tasks.
+- **Verification**: The agent should ask: *"I've finalized the design. Should I record this in a new ADR before we start the implementation plan?"*
 
 ### Never skip this sequence
 
 ```
-1. principal-architect (design)
+1. principal-architect (technical design and trade-off analysis)
    ↓ (approval)
-2. writing-plans (plan)
+2. ADR recording (create/update in docs/adr/) [MANDATORY]
    ↓
-3. TDD (RED tests)
+3. writing-plans (step-by-step implementation tasks)
    ↓
-4. Direct implementation (GREEN)
+4. TDD (RED tests)
    ↓
-5. code-review (verify)
+5. implementation (minimal code for GREEN)
+   ↓
+6. code-review (verify against design and ADR)
    ↓ (approval)
-6. verification (final check)
+7. verification (final check and documentation update)
    ↓
-7. git commit + documentation
+8. git commit + documentation
 ```
 
 ### Why this order matters
@@ -179,10 +189,11 @@ Before invoking, verify:
 | Step | Skip consequence |
 |------|---|
 | Design | "This isn't what we needed" after 3 weeks |
-| Plan | Parallelize-able work done sequentially |
+| ADR | "Why did we do this?" forgotten after 3 months |
+| Plan | Parallelize-able work done sequentially; dependencies missed |
 | TDD | Bugs discovered late → 10x cost |
-| Code review | Design violations merged to main |
-| Verification | Performance worse than expected |
+| Code review | Design violations and performance regressions merged to main |
+| Verification | Performance worse than expected; edge cases missing |
 
 ---
 

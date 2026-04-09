@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/junyoung/core-x/internal/domain"
@@ -80,6 +81,7 @@ type Config struct {
 //   - mu: Write() 호출의 원자성을 보장하는 뮤텍스.
 //   - cfg: 설정 (SyncPolicy, SyncInterval).
 //   - bufPool: Write() 경로의 record 버퍼 재사용 (zero-alloc).
+//   - sizeTracker: 파일의 누적 쓰기 바이트 수. atomic으로 관리.
 //
 // SyncInterval 정책용 필드:
 //   - syncDone: 백그라운드 fsync 고루틴에 종료 신호를 보내는 채널.
@@ -93,6 +95,11 @@ type Writer struct {
 	// Get()으로 *[]byte를 꺼내고 사용 후 Put()으로 반환한다.
 	bufPool sync.Pool
 
+	// sizeTracker는 파일에 누적된 바이트 수를 추적한다.
+	// Phase 2 KV Store의 offset 계산에 사용된다.
+	// 값은 O_APPEND 쓰기 후 누산되므로, 다음 쓰기의 offset을 미리 알 수 있다.
+	sizeTracker atomic.Int64
+
 	// SyncInterval 정책용 필드
 	syncDone chan struct{}
 	syncWg   sync.WaitGroup
@@ -102,6 +109,7 @@ type Writer struct {
 //
 // 파일이 없으면 새로 생성되고, 있으면 append 모드로 열린다.
 // SyncInterval 정책이면 백그라운드 고루틴을 시작하여 주기적으로 fsync를 호출한다.
+// 기존 파일의 크기를 sizeTracker로 초기화하여 offset 추적을 시작한다.
 //
 // 사전 조건: cfg.Path는 유효한 파일 경로여야 한다.
 func NewWriter(cfg Config) (*Writer, error) {
@@ -111,6 +119,13 @@ func NewWriter(cfg Config) (*Writer, error) {
 		0600,
 	)
 	if err != nil {
+		return nil, err
+	}
+
+	// 기존 파일 크기로 sizeTracker 초기화
+	stat, err := f.Stat()
+	if err != nil {
+		f.Close()
 		return nil, err
 	}
 
@@ -126,6 +141,9 @@ func NewWriter(cfg Config) (*Writer, error) {
 			},
 		},
 	}
+
+	// sizeTracker를 기존 파일 크기로 초기화
+	w.sizeTracker.Store(stat.Size())
 
 	// SyncInterval 정책이면 백그라운드 fsync 고루틴 시작.
 	if cfg.SyncPolicy == SyncInterval {
@@ -208,13 +226,16 @@ func (w *Writer) Write(payload []byte) error {
 	return nil
 }
 
-// WriteEvent는 Event를 바이너리 프로토콜에 따라 기록한다.
+// WriteEventOffset는 Event를 바이너리 프로토콜에 따라 기록하고 offset을 반환한다.
 //
-// application/ingestion.WALWriter 포트를 구현한다.
+// Write 직전의 파일 offset을 반환한다. Phase 2 KV Store의 인덱싱에 사용된다.
+// offset은 다음 번 Write의 시작 위치를 의미한다.
+//
 // Event를 pool 버퍼에 직접 encode하여 EncodeEvent() 중간 할당을 제거한다.
 //
 // 성능: 0 allocs/op (pool 히트 시, SyncNever 정책)
-func (w *Writer) WriteEvent(e *domain.Event) error {
+// 반환: (write 직전의 offset, error)
+func (w *Writer) WriteEventOffset(e *domain.Event) (int64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -248,6 +269,9 @@ func (w *Writer) WriteEvent(e *domain.Event) error {
 	binary.BigEndian.PutUint32(checksumBytes[0:4], checksum)
 	buf = append(buf, checksumBytes[:]...)
 
+	// Write 직전의 offset 캡처
+	offset := w.sizeTracker.Load()
+
 	// Single Write syscall
 	_, err := w.file.Write(buf)
 
@@ -256,15 +280,31 @@ func (w *Writer) WriteEvent(e *domain.Event) error {
 	w.bufPool.Put(bp)
 
 	if err != nil {
-		return err
+		return 0, err
 	}
+
+	// sizeTracker 업데이트: 쓰인 바이트 수 추가
+	w.sizeTracker.Add(int64(len(buf)))
 
 	// SyncImmediate 정책
 	if w.cfg.SyncPolicy == SyncImmediate {
-		return w.file.Sync()
+		if err := w.file.Sync(); err != nil {
+			return offset, err
+		}
 	}
 
-	return nil
+	return offset, nil
+}
+
+// WriteEvent는 Event를 바이너리 프로토콜에 따라 기록한다.
+//
+// application/ingestion.WALWriter 포트를 구현한다.
+// 내부적으로 WriteEventOffset을 호출하고 offset을 버린다 (하위호환).
+//
+// 성능: 0 allocs/op (pool 히트 시, SyncNever 정책)
+func (w *Writer) WriteEvent(e *domain.Event) error {
+	_, err := w.WriteEventOffset(e)
+	return err
 }
 
 // Sync는 명시적 fsync 호출을 강제한다.
