@@ -36,6 +36,13 @@
      └──────────┬──────────┘                │
                 │                           │
                 ▼                           ▼
+     ┌──────────────────────────────┐
+     │ Validate & Record (ADR)      │
+     │ □ Design Approved by User    │
+     │ □ ADR written to docs/adr/   │
+     └────────────┬─────────────────┘
+                  │
+                  ▼
     ┌──────────────────────────────┐    request architect
     │ @superpowers:writing-plans   │    again with feedback
     │ Input: design proposal       │
@@ -254,6 +261,7 @@ Documentation
 □ ARCHITECTURE.md written (design decisions documented)
 □ GOTCHAS.md written (limitations and caveats)
 □ OPERATION.md written (operations guide)
+□ ADR for every major architectural change is recorded in docs/adr/
 □ All functions have comments (domain/app/infra separation explained)
 
 Performance

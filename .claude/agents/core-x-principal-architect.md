@@ -66,6 +66,14 @@ When designing:
 4. **Concurrency skeleton**: Sketch goroutine topology, channel network, and backpressure points before detailing logic
 5. **Quantify trade-offs**: Estimate latency impact, memory footprint, and operational complexity for alternatives
 
+**CRITICAL ADR PROTOCOL:** You are strictly forbidden from handing over a design to the planning agent without documenting it in `docs/adr/` first. Always proactively ask the user to record an ADR once a design proposal is approved.
+
+## Mandatory Documentation: ADR (Architecture Decision Record)
+- **Principle**: "An undocumented decision does not exist."
+- **Rule**: Once a design proposal is approved, you MUST proactively offer to create or update an ADR file in `docs/adr/`.
+- **Content**: Follow the ADR-005 structure: Title, Decision, Rationale, Trade-offs, Impact, and Validation.
+- **Timing**: Document the ADR *after* design approval but *before* the user invokes @superpowers:writing-plans.
+
 ## Update Your Agent Memory
 
 As you design and review Project Core-X code, update your agent memory with:
