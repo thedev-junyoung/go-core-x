@@ -78,7 +78,7 @@ core-x/
     │
     ├── application/
     │   └── ingestion/
-    │       └── service.go              # IngestionService, Submitter/Stats/EventPool ports
+    │       └── service.go              # IngestionService, Submitter/Stats/WALWriter ports
     │
     └── infrastructure/
         ├── http/
@@ -86,8 +86,18 @@ core-x/
         │   └── stats.go                # /stats 엔드포인트
         ├── pool/
         │   └── event_pool.go           # sync.Pool 래퍼 (GC-aware object recycling)
-        └── executor/
-            └── worker_pool.go          # goroutine pool, implements Submitter/Stats
+        ├── executor/
+        │   └── worker_pool.go          # goroutine pool, implements Submitter/Stats
+        └── storage/
+            ├── wal/                    # Write-Ahead Log (Phase 2)
+            │   ├── writer.go
+            │   ├── reader.go
+            │   ├── encode.go
+            │   └── errors.go
+            └── kv/                     # Hash Index KV Store (Phase 2, Bitcask model)
+                ├── index.go            # in-memory hash index: map[string]int64
+                ├── store.go            # KV store: WriteEvent/Get/Recover
+                └── store_test.go
 ```
 
 ### File Responsibilities
@@ -123,18 +133,140 @@ core-x/
 
 ---
 
+## Phase 2: Bitcask Model KV Store
+
+### Write Path (Ingest)
+
+```
+HTTP POST /ingest {source, payload}
+         ↓
+IngestionService.Ingest(source, payload)
+         ├─► pool.Acquire()  [0 alloc if hit]
+         │         ↓
+         │   Event{ReceivedAt, Source, Payload}
+         │
+         ├─► kvStore.WriteEvent(e)
+         │         ├─► writer.WriteEventOffset(e)  [offset 반환]
+         │         │        ├─ sizeTracker.Load()  [pre-write offset]
+         │         │        ├─ file.Write(buf)    [WAL append]
+         │         │        └─ sizeTracker.Add()   [누산]
+         │         │
+         │         └─► index.Set(e.Source, offset)  [in-memory map]
+         │              └─ RLock 없음, Lock 획득 후 map[string] = int64
+         │
+         ├─► workerPool.Submit(e)  [비동기 처리]
+         │         ├─ select { case jobCh <- e }
+         │         └─ 채널 full이면 false → 429
+         │
+         └─ return nil/error
+
+Performance:
+  - WriteEvent: ~10 μs (SyncInterval policy)
+  - Allocations: 0 (pool hit) or 1 (map grow on new key)
+```
+
+### Read Path (Get)
+
+```
+HTTP GET /get/{source}  (example, not in Phase 2 API yet)
+         ↓
+kvStore.Get(source)
+         ├─► index.Get(source)  [RLock]
+         │        ├─ mu.RLock()
+         │        ├─ offset, found := entries[source]
+         │        └─ return (offset, found)  [0 alloc]
+         │
+         ├─► ReadRecordAt(readFile, offset)
+         │        ├─ file.ReadAt(header, offset)     [16 bytes]
+         │        ├─ file.ReadAt(payload, offset+16)  [N bytes]
+         │        ├─ file.ReadAt(checksum, offset+16+N)  [4 bytes]
+         │        └─ CRC32 validation
+         │
+         ├─► wal.DecodeEvent(record.Data)  [parsing]
+         │
+         └─ return *Event
+
+Performance:
+  - index.Get: ~50 ns (RLock + map lookup)
+  - ReadRecordAt: ~1-2 μs (single ReadAt syscall)
+  - DecodeEvent: ~100-200 ns
+  - Total: ~2-3 μs
+
+Allocations: 2 (Event struct + string data, unavoidable for value return)
+```
+
+### Recovery Path (Startup)
+
+```
+cmd/main.go initialization:
+         ↓
+kvStore.Recover(onRecover)
+         ├─► wal.NewReader(walPath)
+         │
+         ├─ for reader.Scan() {
+         │      record := reader.Record()
+         │      event := wal.DecodeEvent(record.Data)
+         │
+         │      ├─ index.Set(event.Source, offset)  [index 재구축]
+         │      │
+         │      └─ onRecover(event)  [콜백]
+         │           └─ workerPool.Submit(event)  [처리 복구]
+         │
+         │      offset += RecordSize
+         │   }
+         │
+         └─ return (count, error)
+
+Recovery semantics:
+  - WAL에 있는 모든 완전한 레코드 → index rebuild
+  - ErrTruncated (마지막 불완전): 정상 처리
+  - ErrCorrupted/ErrChecksumMismatch: fatal
+
+Startup time: O(WAL size) ~1 μs/record
+  예: 100M events → ~100 sec (worst case)
+  Phase 3에서 compaction 도입 후 개선
+```
+
+### Crash Guarantees
+
+```
+Write 직전:           offset = 100
+  ↓
+Write OK:             file[100..163] = serialized Event
+  ↓
+index.Set():          index["user-a"] = 100
+  ↓
+Crash (any point):    Recovery replays WAL
+  ├─ Crash during index.Set():
+  │   → WAL에 데이터 있음
+  │   → Recover에서 읽음
+  │   → index 재구축
+  │   (eventual consistency, ~nanoseconds drift)
+  │
+  └─ Crash before Write:
+      → WAL에 데이터 없음
+      → Recover에서 보이지 않음
+      (원자성 보장)
+
+Single source of truth: WAL
+  → "Crash 직후 Get(source)" = "Crash 직전의 최신 값"
+  → (Crash 직후 index 미구축 가능하지만, Recover로 자동 복구)
+```
+
+---
+
 ## Roadmap (Bottom-Up)
 
-### Phase 1: High-Performance Heart (1.5mo)
+### Phase 1: High-Performance Heart ✅ COMPLETE
 - [x] No-Framework HTTP/TCP Collection Engine
 - [x] Goroutine Worker Pool & Zero-copy logic
 - [x] Clean Architecture Layering (zero-alloc preserved)
-- [ ] Benchmarking & GC Optimization
+- [x] Benchmarking & GC Optimization
 
-### Phase 2: Trusted Persistence (2mo)
-- [ ] Write-Ahead Log (WAL) implementation
-- [ ] Key-Value Store with Hash Index
-- [ ] Crash Recovery & Binary Serialization
+### Phase 2: Trusted Persistence ✅ COMPLETE (2026-04-09)
+- [x] Write-Ahead Log (WAL) implementation
+- [x] Key-Value Store with Hash Index (Bitcask model)
+- [x] Crash Recovery with WAL replay
 
 ### Phase 3: Distributed Scalability (2.5mo)
 - [ ] Node-to-Node Communication (gRPC)
@@ -152,9 +284,14 @@ core-x/
 
 기록이 곧 실력입니다. 매 결정의 이유를 여기에 기록하세요.
 
+### Phase 1 (Complete)
 - [ADR-001: Pure Go 선택](docs/adr/0001-use-pure-go-standard-library.md)
 - [ADR-002: Worker Pool & Sync.Pool 설계](docs/adr/0002-worker-pool-and-sync-pool-for-performance.md)
-- [ADR-003: Clean Architecture + Zero-Allocation](docs/adr/0003-clean-architecture-with-zero-allocation.md) ← Phase 1 완성
+- [ADR-003: Clean Architecture + Zero-Allocation](docs/adr/0003-clean-architecture-with-zero-allocation.md)
+- [ADR-004: WAL Reader 설계](docs/adr/0004-wal-reader-design.md)
+
+### Phase 2 (Complete)
+- [ADR-005: Hash Index KV Store (Bitcask Model)](docs/adr/0005-hash-index-kv-store-bitcask.md) ← Phase 2 완성
 
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 
@@ -162,4 +299,5 @@ core-x/
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Daily Goal**: 1 Hour Deep Work
+- **Current Status**: Phase 2 Complete (2026-04-09)
+- **Next Phase**: Phase 3 — Distributed Scalability (Consistent Hashing, gRPC, Replication)
