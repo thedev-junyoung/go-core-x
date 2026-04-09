@@ -16,7 +16,8 @@
       "Bash(gh repo:*)",
       "Bash(gh issue:*)",
       "Bash(git stash:*)",
-      "Bash(git rebase:*)"
+      "Bash(git rebase:*)",
+      "Bash(git pull:*)"
     ]
   }
 }
