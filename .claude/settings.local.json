@@ -15,7 +15,8 @@
       "Bash(go build:*)",
       "Bash(gh repo:*)",
       "Bash(gh issue:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(git rebase:*)"
     ]
   }
 }
