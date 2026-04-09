@@ -20,5 +20,29 @@
       "Bash(git pull:*)",
       "Bash(git merge:*)"
     ]
+  },
+  "commands": {
+    "git": {
+      "auto_approve": [
+        "status",
+        "diff",
+        "log",
+        "show",
+        "rev-parse",
+        "branch",
+        "fetch",
+        "pull",
+        "ls-files"
+      ]
+    },
+    "gh": {
+      "auto_approve": [
+        "pr status",
+        "pr list",
+        "pr view",
+        "issue list",
+        "issue view"
+      ]
+    }
   }
 }

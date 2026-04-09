@@ -44,6 +44,7 @@ Specify explicitly [what] needs to be done.
 - WAL Writer design ✓
 - WAL integration checklist ✓
 - WAL Reader design ✓
+- Hash Index KV Store (Bitcask model) design ✓
 
 ---
 
