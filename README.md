@@ -267,6 +267,7 @@ Single source of truth: WAL
 - [x] Write-Ahead Log (WAL) implementation
 - [x] Key-Value Store with Hash Index (Bitcask model)
 - [x] Crash Recovery with WAL replay
+- [x] WAL Compaction (stop-the-world, atomic rename)
 
 ### Phase 3: Distributed Scalability (2.5mo)
 - [ ] Node-to-Node Communication (gRPC)
@@ -291,7 +292,8 @@ Single source of truth: WAL
 - [ADR-004: WAL Reader 설계](docs/adr/0004-wal-reader-design.md)
 
 ### Phase 2 (Complete)
-- [ADR-005: Hash Index KV Store (Bitcask Model)](docs/adr/0005-hash-index-kv-store-bitcask.md) ← Phase 2 완성
+- [ADR-005: Hash Index KV Store (Bitcask Model)](docs/adr/0005-hash-index-kv-store-bitcask.md)
+- [ADR-006: WAL Compaction](docs/adr/0006-wal-compaction.md) ← Phase 2 완성
 
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 

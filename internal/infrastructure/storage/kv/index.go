@@ -96,6 +96,22 @@ func (idx *HashIndex) Delete(key string) {
 	delete(idx.entries, key)
 }
 
+// Snapshot returns a copy of all index entries as map[string]int64.
+//
+// Used by Compact() to iterate over all live keys without holding the lock
+// for the duration of I/O. The snapshot is a point-in-time copy; writes that
+// arrive after Snapshot() returns are not reflected.
+func (idx *HashIndex) Snapshot() map[string]int64 {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	snap := make(map[string]int64, len(idx.entries))
+	for k, v := range idx.entries {
+		snap[k] = v
+	}
+	return snap
+}
+
 // Len returns the number of entries in the index.
 //
 // Used for monitoring and maxKeys enforcement.

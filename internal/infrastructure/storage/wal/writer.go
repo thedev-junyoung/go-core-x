@@ -348,6 +348,29 @@ func (w *Writer) Close() error {
 	return nil
 }
 
+// RunExclusiveSwap pauses all writes and runs fn under the writer's lock.
+//
+// fn must return (newFile, newSize, error). On success, the writer atomically
+// replaces its underlying file handle with newFile and resets sizeTracker to
+// newSize. The old file is closed.
+//
+// Used by kv.Store.Compact() to atomically replace the WAL file while
+// blocking concurrent writes for the duration of compaction.
+func (w *Writer) RunExclusiveSwap(fn func() (*os.File, int64, error)) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	newFile, newSize, err := fn()
+	if err != nil {
+		return err
+	}
+
+	old := w.file
+	w.file = newFile
+	w.sizeTracker.Store(newSize)
+	return old.Close()
+}
+
 // startSyncTicker는 SyncInterval 정책용 백그라운드 fsync 고루틴을 시작한다.
 //
 // 동작:
