@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/junyoung/core-x/internal/domain"
 	"github.com/junyoung/core-x/internal/infrastructure/storage/wal"
@@ -35,9 +36,11 @@ import (
 //
 // Thread-safety:
 //   - WriteEvent: Uses writer.mu internally (via WriteEventOffset)
-//   - Get: Uses index.mu (RLock) + single ReadAt syscall (no concurrent issues)
+//   - Get: Uses mu (RLock) to snapshot index/readFile pointers; index.mu for key lookup
+//   - Compact: Uses writer.RunExclusiveSwap (blocks writes) + mu (Lock) to swap pointers
 //   - Recover: Single-threaded (startup path only)
 type Store struct {
+	mu       sync.RWMutex // protects index and readFile pointer swaps during Compact
 	index    *HashIndex
 	writer   *wal.Writer
 	readFile *os.File
@@ -128,16 +131,24 @@ func (s *Store) WriteEvent(e *domain.Event) error {
 //   - DecodeEvent: allocates Event struct + strings (unavoidable for value return)
 //   - Net: O(payload_size) allocations (necessary for value semantics)
 //
-// Concurrency: Safe for concurrent calls (index.mu + os.File.ReadAt is concurrent-safe).
+// Concurrency: Safe for concurrent calls. mu.RLock snapshots index and readFile
+// pointers so Compact() can swap them without a race.
 func (s *Store) Get(key string) (*domain.Event, error) {
+	// Snapshot index and readFile pointers under read lock.
+	// Compact() may replace these pointers; snapshot ensures we use a consistent pair.
+	s.mu.RLock()
+	idx := s.index
+	rf := s.readFile
+	s.mu.RUnlock()
+
 	// Step 1: Lookup index
-	offset, found := s.index.Get(key)
+	offset, found := idx.Get(key)
 	if !found {
 		return nil, ErrKeyNotFound
 	}
 
 	// Step 2: Read record from WAL at offset
-	record, err := wal.ReadRecordAt(s.readFile, offset)
+	record, err := wal.ReadRecordAt(rf, offset)
 	if err != nil {
 		return nil, fmt.Errorf("kv: failed to read record at offset %d: %w", offset, err)
 	}

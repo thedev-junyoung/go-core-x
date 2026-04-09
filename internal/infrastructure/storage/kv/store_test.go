@@ -365,6 +365,138 @@ func TestStore_MaxKeys(t *testing.T) {
 	}
 }
 
+// TestStore_Compact tests WAL compaction: stale records removed, latest values preserved.
+func TestStore_Compact(t *testing.T) {
+	tmpDir := t.TempDir()
+	walPath := filepath.Join(tmpDir, "test.wal")
+
+	writer, err := wal.NewWriter(wal.Config{
+		Path:       walPath,
+		SyncPolicy: wal.SyncNever,
+	})
+	if err != nil {
+		t.Fatalf("failed to create wal writer: %v", err)
+	}
+	defer writer.Close()
+
+	store, err := NewStore(writer, walPath, 100)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Write source-a three times: only the last write should survive compaction.
+	for _, payload := range []string{"v1", "v2", "v3"} {
+		if err := store.WriteEvent(&domain.Event{
+			ReceivedAt: time.Now(),
+			Source:     "source-a",
+			Payload:    payload,
+		}); err != nil {
+			t.Fatalf("WriteEvent(%q) failed: %v", payload, err)
+		}
+	}
+
+	// Write source-b once.
+	if err := store.WriteEvent(&domain.Event{
+		ReceivedAt: time.Now(),
+		Source:     "source-b",
+		Payload:    "only-value",
+	}); err != nil {
+		t.Fatalf("WriteEvent(source-b) failed: %v", err)
+	}
+
+	// WAL has 4 records but only 2 live keys.
+	wantSizeBefore := int64(4)
+	_ = wantSizeBefore // size not directly observable; verified via WAL replay below
+
+	// Run compaction.
+	if err := store.Compact(); err != nil {
+		t.Fatalf("Compact() failed: %v", err)
+	}
+
+	// After compaction: Get must still return latest values.
+	got, err := store.Get("source-a")
+	if err != nil {
+		t.Fatalf("Get(source-a) after compact: %v", err)
+	}
+	if got.Payload != "v3" {
+		t.Errorf("source-a: expected v3, got %q", got.Payload)
+	}
+
+	got, err = store.Get("source-b")
+	if err != nil {
+		t.Fatalf("Get(source-b) after compact: %v", err)
+	}
+	if got.Payload != "only-value" {
+		t.Errorf("source-b: expected only-value, got %q", got.Payload)
+	}
+
+	// Compacted WAL must contain exactly 2 records (one per live key).
+	// Verify by replaying the WAL with a fresh writer (independent of store's writer).
+	count := 0
+	writer2, err := wal.NewWriter(wal.Config{Path: walPath, SyncPolicy: wal.SyncNever})
+	if err != nil {
+		t.Fatalf("failed to create writer2: %v", err)
+	}
+	store2, err := NewStore(writer2, walPath, 100)
+	if err != nil {
+		writer2.Close()
+		t.Fatalf("failed to create store2: %v", err)
+	}
+	defer store2.Close()
+	defer writer2.Close()
+
+	recovered, err := store2.Recover(func(_ *domain.Event) { count++ })
+	if err != nil {
+		t.Fatalf("Recover on compacted WAL: %v", err)
+	}
+	if recovered != 2 {
+		t.Errorf("compacted WAL: expected 2 records, got %d", recovered)
+	}
+}
+
+// TestStore_CompactThenWrite verifies writes after compaction are appended correctly.
+func TestStore_CompactThenWrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	walPath := filepath.Join(tmpDir, "test.wal")
+
+	writer, err := wal.NewWriter(wal.Config{
+		Path:       walPath,
+		SyncPolicy: wal.SyncNever,
+	})
+	if err != nil {
+		t.Fatalf("failed to create wal writer: %v", err)
+	}
+	defer writer.Close()
+
+	store, err := NewStore(writer, walPath, 100)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.WriteEvent(&domain.Event{Source: "k1", Payload: "before"}); err != nil {
+		t.Fatalf("WriteEvent: %v", err)
+	}
+
+	if err := store.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	// Write after compaction must append to the new WAL.
+	if err := store.WriteEvent(&domain.Event{Source: "k1", Payload: "after"}); err != nil {
+		t.Fatalf("WriteEvent after compact: %v", err)
+	}
+
+	got, err := store.Get("k1")
+	if err != nil {
+		t.Fatalf("Get after compact+write: %v", err)
+	}
+	if got.Payload != "after" {
+		t.Errorf("expected after, got %q", got.Payload)
+	}
+}
+
 // TestStore_WALWriterInterface verifies Store implements WALWriter interface.
 func TestStore_WALWriterInterface(t *testing.T) {
 	tmpDir := t.TempDir()
