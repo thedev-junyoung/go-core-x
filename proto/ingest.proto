@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package ingest;
+
+option go_package = "github.com/junyoung/core-x/proto/pb";
+
+// IngestionService handles event ingestion between nodes.
+service IngestionService {
+  rpc Ingest(IngestRequest) returns (IngestResponse);
+}
+
+// IngestRequest carries the event source and payload for inter-node forwarding.
+message IngestRequest {
+  string source  = 1;
+  bytes  payload = 2;
+}
+
+// IngestResponse reports the result of an ingest operation.
+message IngestResponse {
+  bool   ok      = 1;
+  string message = 2;
+}

@@ -38,12 +38,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	appingestion "github.com/junyoung/core-x/internal/application/ingestion"
 	"github.com/junyoung/core-x/internal/domain"
+	"github.com/junyoung/core-x/internal/infrastructure/cluster"
 	"github.com/junyoung/core-x/internal/infrastructure/executor"
+	infragrpc "github.com/junyoung/core-x/internal/infrastructure/grpc"
 	infrahttp "github.com/junyoung/core-x/internal/infrastructure/http"
 	"github.com/junyoung/core-x/internal/infrastructure/pool"
 	kvstore "github.com/junyoung/core-x/internal/infrastructure/storage/kv"
@@ -59,6 +62,17 @@ func main() {
 	bufferDepth := envInt("CORE_X_BUFFER_DEPTH", numWorkers*10)
 	walPath := envOr("CORE_X_WAL_PATH", "./data/events.wal")
 	shutdownTimeout := 30 * time.Second
+
+	// Phase 3: 클러스터 설정 (비어 있으면 단일 노드 모드로 동작).
+	nodeID := envOr("CORE_X_NODE_ID", "")
+	grpcAddr := envOr("CORE_X_GRPC_ADDR", "")
+	peers := envOr("CORE_X_PEERS", "")           // "node-2:localhost:9002,node-3:localhost:9003"
+	vnodeCount := envInt("CORE_X_VNODE_COUNT", 150)
+	forwardTimeoutStr := envOr("CORE_X_FORWARD_TIMEOUT", "3s")
+	forwardTimeout, err := time.ParseDuration(forwardTimeoutStr)
+	if err != nil {
+		forwardTimeout = 3 * time.Second
+	}
 
 	// --- 구조화 로깅 (Structured Logging) ------------------------------------
 	// slog (Go 1.21 stdlib): 외부 의존성 없음, 구조화 출력,
@@ -187,12 +201,78 @@ func main() {
 	// KVStore는 내부적으로 walWriter를 사용하여 투명하게 WAL 기록 + index를 처리한다.
 	svc := appingestion.NewIngestionService(workerPool, eventPool, kvStore)
 
+	// --- Phase 3: 클러스터 초기화 -------------------------------------------
+	// CORE_X_NODE_ID가 설정되어 있으면 클러스터 모드로 동작한다.
+	// 설정이 없으면 단일 노드 모드 (Phase 1/2 동작 그대로).
+	var (
+		ring      *cluster.Ring
+		forwarder *infragrpc.Forwarder
+		grpcSrv   *infragrpc.Server
+	)
+
+	if nodeID != "" && grpcAddr != "" {
+		ring = cluster.NewRing(vnodeCount)
+
+		// 자신을 ring에 등록.
+		selfNode := cluster.NewNode(nodeID, grpcAddr)
+		ring.AddNode(selfNode)
+
+		// 피어 노드 파싱 및 ring 등록.
+		// 형식: "node-2:localhost:9002,node-3:localhost:9003"
+		if peers != "" {
+			for _, peer := range splitPeers(peers) {
+				if peer.id != "" && peer.addr != "" {
+					ring.AddNode(cluster.NewNode(peer.id, peer.addr))
+				}
+			}
+		}
+
+		// health probe 시작.
+		membership := cluster.NewMembership(ring)
+		membershipCtx, membershipCancel := context.WithCancel(context.Background())
+		defer membershipCancel()
+		membership.Start(membershipCtx)
+
+		// gRPC 포워더.
+		clientPool := infragrpc.NewClientPool()
+		forwarder = infragrpc.NewForwarder(clientPool)
+		defer clientPool.Close()
+
+		// gRPC 서버 시작.
+		var grpcErr error
+		grpcSrv, grpcErr = infragrpc.NewServer(grpcAddr, svc)
+		if grpcErr != nil {
+			slog.Error("failed to start grpc server", "addr", grpcAddr, "err", grpcErr)
+			os.Exit(1)
+		}
+		go func() {
+			slog.Info("grpc server listening", "addr", grpcSrv.Addr)
+			if err := grpcSrv.Serve(); err != nil {
+				slog.Error("grpc server error", "err", err)
+			}
+		}()
+
+		slog.Info("cluster mode enabled",
+			"node_id", nodeID,
+			"grpc_addr", grpcAddr,
+			"ring_nodes", ring.Len(),
+			"vnode_count", vnodeCount,
+		)
+	}
+
 	// --- HTTP 라우터 (HTTP Router) -------------------------------------------
 	// 순수 stdlib ServeMux. 미들웨어 프레임워크 없음.
 	// 크로스커팅 관심사(인증, 추적)는 필요 시 http.Handler 래퍼로 구현된다 —
 	// 프레임워크 의존성을 추가하지 않는다.
+	var ingestHandler *infrahttp.HTTPHandler
+	if ring != nil {
+		ingestHandler = infrahttp.NewClusterHTTPHandler(svc, ring, nodeID, forwarder, forwardTimeout)
+	} else {
+		ingestHandler = infrahttp.NewHTTPHandler(svc)
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle("POST /ingest", infrahttp.NewHTTPHandler(svc))
+	mux.Handle("POST /ingest", ingestHandler)
 	mux.HandleFunc("GET /stats", infrahttp.StatsHandler(workerPool))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -264,7 +344,13 @@ func main() {
 			slog.Info("kv store closed")
 		}
 
-		// Step 3: jobCh를 닫고 모든 worker가 드레인·종료할 때까지 대기.
+		// Step 3: gRPC 서버 graceful stop (클러스터 모드).
+		if grpcSrv != nil {
+			grpcSrv.Stop()
+			slog.Info("grpc server stopped")
+		}
+
+		// Step 4: jobCh를 닫고 모든 worker가 드레인·종료할 때까지 대기.
 		// server.Shutdown 이후이므로 Submit()이 닫힌 채널로 전송하는 경쟁이 없다.
 		// WAL과 kvStore가 이미 닫혔으므로 Worker 처리 결과는 이미 영속화된 상태다.
 		workerPool.Shutdown(ctx)
@@ -290,6 +376,34 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+type peerEntry struct {
+	id   string
+	addr string
+}
+
+// splitPeers parses the CORE_X_PEERS environment variable.
+// Expected format: "node-2:localhost:9002,node-3:localhost:9003"
+// Each entry is "nodeID:host:port".
+func splitPeers(s string) []peerEntry {
+	var result []peerEntry
+	for _, entry := range strings.Split(s, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		// Split on first colon only to get nodeID; the rest is the address.
+		idx := strings.Index(entry, ":")
+		if idx < 0 {
+			continue
+		}
+		result = append(result, peerEntry{
+			id:   entry[:idx],
+			addr: entry[idx+1:],
+		})
+	}
+	return result
 }
 
 // envInt는 지정된 환경 변수의 정수 값을 반환한다.

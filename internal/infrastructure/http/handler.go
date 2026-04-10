@@ -21,14 +21,18 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	// application 계층을 import한다: 허용된 방향 (infrastructure → application).
 	// application이 infrastructure를 import하는 역방향은 의존성 규칙 위반이다.
 	appingestion "github.com/junyoung/core-x/internal/application/ingestion"
+	"github.com/junyoung/core-x/internal/infrastructure/cluster"
+	infragrpc "github.com/junyoung/core-x/internal/infrastructure/grpc"
 )
 
 // ingestRequest는 POST /ingest의 JSON 와이어 포맷이다.
@@ -47,19 +51,44 @@ type ingestRequest struct {
 
 // HTTPHandler 는 POST /ingest 요청을 처리한다.
 //
-// 왜 stateless인가?
-// IngestionService에 대한 참조 외에 상태를 보유하지 않는다.
-// 덕분에 여러 고루틴에서 동시에 ServeHTTP를 호출해도 안전하다 (http.Handler 계약).
+// Phase 3 확장: ring과 forwarder가 주입되면 consistent hashing으로
+// 담당 노드를 결정하고 필요 시 gRPC로 forwarding한다.
+// ring이 nil이거나 selfID가 담당 노드이면 기존 로컬 처리 경로를 그대로 사용한다.
 //
 // http.Handler를 구현하므로 실제 서버를 띄우지 않고
 // httptest.NewRecorder로 테스트할 수 있다.
 type HTTPHandler struct {
-	svc *appingestion.IngestionService // concrete 참조: 핫 경로 itab 조회 제거 (ADR-002)
+	svc            *appingestion.IngestionService // concrete 참조: 핫 경로 itab 조회 제거 (ADR-002)
+	ring           *cluster.Ring                 // nil이면 단일 노드 모드
+	selfID         string                        // 자신의 노드 ID
+	forwarder      *infragrpc.Forwarder          // gRPC 포워더
+	forwardTimeout time.Duration                 // 포워딩 RPC 타임아웃
 }
 
-// NewHTTPHandler 는 핸들러를 수집 서비스에 연결한다.
+// NewHTTPHandler 는 핸들러를 수집 서비스에 연결한다 (단일 노드 모드).
 func NewHTTPHandler(svc *appingestion.IngestionService) *HTTPHandler {
 	return &HTTPHandler{svc: svc}
+}
+
+// NewClusterHTTPHandler 는 클러스터 모드 핸들러를 생성한다.
+// ring.Lookup으로 담당 노드를 결정하고, 자신이 아니면 forwarder로 gRPC forward한다.
+func NewClusterHTTPHandler(
+	svc *appingestion.IngestionService,
+	ring *cluster.Ring,
+	selfID string,
+	forwarder *infragrpc.Forwarder,
+	forwardTimeout time.Duration,
+) *HTTPHandler {
+	if forwardTimeout <= 0 {
+		forwardTimeout = 3 * time.Second
+	}
+	return &HTTPHandler{
+		svc:            svc,
+		ring:           ring,
+		selfID:         selfID,
+		forwarder:      forwarder,
+		forwardTimeout: forwardTimeout,
+	}
 }
 
 // ServeHTTP 는 POST /ingest를 처리한다.
@@ -92,6 +121,30 @@ func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Phase 3: 클러스터 모드이면 consistent hashing으로 담당 노드를 결정한다.
+	// ring이 nil이면 단일 노드 모드 — 기존 로컬 처리 경로로 직행한다.
+	if h.ring != nil {
+		if target, ok := h.ring.Lookup(req.Source); ok && target.ID != h.selfID {
+			if !target.IsHealthy() {
+				slog.Warn("target node unhealthy; rejecting request",
+					"source", req.Source, "target_node", target.ID)
+				http.Error(w, "target node unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			// gRPC forward: 담당 노드에 요청을 전달한다.
+			ctx, cancel := context.WithTimeout(r.Context(), h.forwardTimeout)
+			defer cancel()
+			if err := h.forwarder.Forward(ctx, target, req.Source, []byte(req.Payload)); err != nil {
+				slog.Error("forward failed", "source", req.Source, "target", target.ID, "err", err)
+				http.Error(w, "target node unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+	}
+
+	// 로컬 처리 경로 (단일 노드 모드 또는 자신이 담당 노드인 경우).
 	if err := h.svc.Ingest(req.Source, req.Payload); err != nil {
 		if errors.Is(err, appingestion.ErrOverloaded) {
 			// 429는 "좋은 거절"이다: silent drop이나 무한 대기 대신
@@ -100,7 +153,7 @@ func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "server overloaded, retry later", http.StatusTooManyRequests)
 			return
 		}
-		// 예상치 못한 에러 경로 — Phase 1에서는 발생하지 않아야 한다.
+		// 예상치 못한 에러 경로.
 		// Phase 4에서 Prometheus 카운터로 계측한다.
 		slog.Error("ingest error", "err", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
