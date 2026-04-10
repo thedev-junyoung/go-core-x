@@ -18,7 +18,11 @@
       "Bash(git stash:*)",
       "Bash(git rebase:*)",
       "Bash(git pull:*)",
-      "Bash(git merge:*)"
+      "Bash(git merge:*)",
+      "Bash(go get:*)",
+      "Bash(go install:*)",
+      "Bash(brew install:*)",
+      "Bash(protoc:*)"
     ]
   },
   "commands": {

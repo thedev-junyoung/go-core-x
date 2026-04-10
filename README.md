@@ -10,10 +10,11 @@
 - **AI-Driven**: 에이전트 코딩을 활용한 설계 리뷰 및 지능형 운영 자동화.
 
 ## Tech Stack
-- **Language**: Go (Pure Go)
-- **Communication**: gRPC, Protobuf
-- **Storage**: Custom WAL (Write-Ahead Log), LSM-Tree Structure
-- **Observability**: Prometheus, Elastic APM
+- **Language**: Go
+- **Communication**: gRPC (`google.golang.org/grpc`), Protobuf (노드 간 통신)
+- **Storage**: Custom WAL (Write-Ahead Log), Hash Index KV Store (Bitcask model)
+- **Partitioning**: Virtual Nodes Consistent Hashing (Phase 3)
+- **Observability**: Prometheus, Elastic APM (Phase 4)
 - **Intelligence**: Claude / Cursor Agentic Workflow
 
 ---
@@ -88,6 +89,15 @@ core-x/
         │   └── event_pool.go           # sync.Pool 래퍼 (GC-aware object recycling)
         ├── executor/
         │   └── worker_pool.go          # goroutine pool, implements Submitter/Stats
+        ├── cluster/                    # Phase 3: 분산 클러스터 멤버십
+        │   ├── ring.go             # Virtual Nodes consistent hash ring
+        │   ├── ring_test.go
+        │   ├── node.go             # Node struct (ID, Addr, healthy atomic.Bool)
+        │   └── membership.go       # 노드 health probe goroutine
+        ├── grpc/                       # Phase 3: 노드 간 gRPC 통신
+        │   ├── server.go           # gRPC IngestionService 구현
+        │   ├── client.go           # gRPC client pool (nodeID → *ClientConn)
+        │   └── forward.go          # forward 결정 + gRPC 호출
         └── storage/
             ├── wal/                    # Write-Ahead Log (Phase 2)
             │   ├── writer.go
@@ -98,6 +108,12 @@ core-x/
                 ├── index.go            # in-memory hash index: map[string]int64
                 ├── store.go            # KV store: WriteEvent/Get/Recover
                 └── store_test.go
+
+proto/
+└── ingest.proto                        # Phase 3: 노드 간 통신 계약 (Protobuf)
+    pb/
+    ├── ingest.pb.go                # protoc-gen-go 생성
+    └── ingest_grpc.pb.go           # protoc-gen-go-grpc 생성
 ```
 
 ### File Responsibilities
@@ -127,8 +143,8 @@ core-x/
 |---|---|---|
 | Phase 2: WAL persistence | `executor/worker_pool.go`의 `Processor` 교체 (`domain.EventProcessor` 구현) | HTTP handler, Application service 무변경 |
 | Phase 2: Binary serialization | `domain/event.go`에 `MarshalBinary()` 추가 | Infrastructure만 사용, Application 무관 |
-| Phase 3: gRPC ingestion | `infrastructure/grpc/handler.go` 신규 추가 (동일 `IngestionService` 재사용) | Domain, Application 무변경 |
-| Phase 3: Protobuf wire format | `infrastructure/http/handler.go`의 `ingestRequest` 교체 | Domain `Event` 타입 무변경 |
+| Phase 3: gRPC ingestion | `infrastructure/grpc/server.go` 신규 추가 (동일 `IngestionService` 재사용) | Domain, Application 무변경 |
+| Phase 3: Consistent Hashing | `infrastructure/cluster/ring.go` 신규 추가, `http/handler.go`에 ring lookup 추가 | IngestionService 무변경 |
 | Phase 4: Prometheus metrics | `infrastructure/http/stats.go` 교체 또는 병행 | `Stats` 포트 구현체만 변경 |
 
 ---
@@ -255,6 +271,48 @@ Single source of truth: WAL
 
 ---
 
+## Phase 3: Distributed Partitioning
+
+### Cluster Configuration
+
+환경 변수로 클러스터 모드를 활성화한다. 미설정 시 단일 노드 모드로 동작한다.
+
+```bash
+# Node 1
+CORE_X_NODE_ID=node-1 \
+CORE_X_GRPC_ADDR=:9001 \
+CORE_X_PEERS="node-2:localhost:9002,node-3:localhost:9003" \
+CORE_X_ADDR=:8081 \
+./core-x
+
+# Node 2
+CORE_X_NODE_ID=node-2 \
+CORE_X_GRPC_ADDR=:9002 \
+CORE_X_PEERS="node-1:localhost:9001,node-3:localhost:9003" \
+CORE_X_ADDR=:8082 \
+./core-x
+```
+
+### Request Routing
+
+```
+POST /ingest {source: "user-x", payload: "..."}
+  │
+  ▼ ring.Lookup("user-x") → node-2 담당
+  │
+  ├─ 수신 노드 == node-2? → 로컬 kvStore.WriteEvent()
+  └─ 수신 노드 != node-2? → gRPC forward → node-2
+                                └─ node-2 unhealthy? → HTTP 503
+```
+
+### Virtual Nodes Ring
+
+- 노드당 150 vnodes (기본값, `CORE_X_VNODE_COUNT`로 조정 가능)
+- FNV-32a 해시, binary search로 담당 노드 결정 (~10 ns)
+- 3개 노드 기준 균등 분산 오차 < 5%
+
+---
+
 ## Roadmap (Bottom-Up)
 
 ### Phase 1: High-Performance Heart ✅ COMPLETE
@@ -269,10 +327,10 @@ Single source of truth: WAL
 - [x] Crash Recovery with WAL replay
 - [x] WAL Compaction (stop-the-world, atomic rename)
 
-### Phase 3: Distributed Scalability (2.5mo)
-- [ ] Node-to-Node Communication (gRPC)
-- [ ] Consistent Hashing for Partitioning
-- [ ] Basic Consensus Algorithm for Replication
+### Phase 3: Distributed Scalability (In Progress)
+- [x] Node-to-Node Communication (gRPC) — `infrastructure/grpc/`
+- [x] Consistent Hashing for Partitioning — Virtual Nodes, `infrastructure/cluster/`
+- [ ] Basic Replication — Primary→Replica async WAL streaming
 
 ### Phase 4: Intelligence & Observability (Ongoing)
 - [ ] Custom Metrics & Dashboard
@@ -295,11 +353,15 @@ Single source of truth: WAL
 - [ADR-005: Hash Index KV Store (Bitcask Model)](docs/adr/0005-hash-index-kv-store-bitcask.md)
 - [ADR-006: WAL Compaction](docs/adr/0006-wal-compaction.md) ← Phase 2 완성
 
+### Phase 3 (In Progress)
+- [ADR-007: Distributed Partitioning — gRPC + Virtual Nodes Consistent Hashing](docs/adr/0007-distributed-partitioning-grpc-consistent-hashing.md)
+
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 
 ---
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Current Status**: Phase 2 Complete (2026-04-09)
-- **Next Phase**: Phase 3 — Distributed Scalability (Consistent Hashing, gRPC, Replication)
+- **Current Status**: Phase 3 In Progress (2026-04-10)
+- **Completed**: Phase 3a — gRPC Node Communication + Virtual Nodes Consistent Hashing
+- **Next**: Phase 3b — Basic Replication (Primary → Replica async WAL streaming)
