@@ -22,7 +22,14 @@
       "Bash(go get:*)",
       "Bash(go install:*)",
       "Bash(brew install:*)",
-      "Bash(protoc:*)"
+      "Bash(protoc:*)",
+      "Bash(chmod:*)",
+      "Bash(go vet:*)",
+      "Bash(go run:*)",
+      "Bash(kill 42144)",
+      "Bash(rm -f /tmp/core-x-integ.wal)",
+      "Bash(CORE_X_BINARY=/tmp/core-x-bin go test ./tools/chaos/... -v -timeout 120s 2>&1)",
+      "Bash(xargs file:*)"
     ]
   },
   "commands": {
