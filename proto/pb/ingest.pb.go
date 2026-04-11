@@ -355,6 +355,235 @@ func (x *GetResponse) GetReceivedAtUnixNs() int64 {
 	return 0
 }
 
+// RequestVoteRequest is sent by a Candidate to each peer.
+type RequestVoteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                                       // Candidate's current term
+	CandidateId   string                 `protobuf:"bytes,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`       // Candidate's node ID
+	LastLogIndex  int64                  `protobuf:"varint,3,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"` // Candidate's last log index (log completeness check, §5.4.1)
+	LastLogTerm   int64                  `protobuf:"varint,4,opt,name=last_log_term,json=lastLogTerm,proto3" json:"last_log_term,omitempty"`    // Candidate's last log term
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestVoteRequest) Reset() {
+	*x = RequestVoteRequest{}
+	mi := &file_proto_ingest_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestVoteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestVoteRequest) ProtoMessage() {}
+
+func (x *RequestVoteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_ingest_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestVoteRequest.ProtoReflect.Descriptor instead.
+func (*RequestVoteRequest) Descriptor() ([]byte, []int) {
+	return file_proto_ingest_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *RequestVoteRequest) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *RequestVoteRequest) GetCandidateId() string {
+	if x != nil {
+		return x.CandidateId
+	}
+	return ""
+}
+
+func (x *RequestVoteRequest) GetLastLogIndex() int64 {
+	if x != nil {
+		return x.LastLogIndex
+	}
+	return 0
+}
+
+func (x *RequestVoteRequest) GetLastLogTerm() int64 {
+	if x != nil {
+		return x.LastLogTerm
+	}
+	return 0
+}
+
+// RequestVoteResponse is the peer's reply to RequestVote.
+type RequestVoteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"` // Responder's current term (Candidate uses to update itself)
+	VoteGranted   bool                   `protobuf:"varint,2,opt,name=vote_granted,json=voteGranted,proto3" json:"vote_granted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestVoteResponse) Reset() {
+	*x = RequestVoteResponse{}
+	mi := &file_proto_ingest_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestVoteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestVoteResponse) ProtoMessage() {}
+
+func (x *RequestVoteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_ingest_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestVoteResponse.ProtoReflect.Descriptor instead.
+func (*RequestVoteResponse) Descriptor() ([]byte, []int) {
+	return file_proto_ingest_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RequestVoteResponse) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *RequestVoteResponse) GetVoteGranted() bool {
+	if x != nil {
+		return x.VoteGranted
+	}
+	return false
+}
+
+// AppendEntriesRequest is sent by the Leader as a periodic heartbeat.
+// TODO(phase5b): add entries, prev_log_index, prev_log_term, leader_commit.
+type AppendEntriesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                        // Leader's current term
+	LeaderId      string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"` // Leader's node ID
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppendEntriesRequest) Reset() {
+	*x = AppendEntriesRequest{}
+	mi := &file_proto_ingest_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendEntriesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendEntriesRequest) ProtoMessage() {}
+
+func (x *AppendEntriesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_ingest_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendEntriesRequest.ProtoReflect.Descriptor instead.
+func (*AppendEntriesRequest) Descriptor() ([]byte, []int) {
+	return file_proto_ingest_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *AppendEntriesRequest) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+// AppendEntriesResponse is the Follower's reply to AppendEntries.
+type AppendEntriesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"` // Responder's current term
+	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppendEntriesResponse) Reset() {
+	*x = AppendEntriesResponse{}
+	mi := &file_proto_ingest_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendEntriesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendEntriesResponse) ProtoMessage() {}
+
+func (x *AppendEntriesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_ingest_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendEntriesResponse.ProtoReflect.Descriptor instead.
+func (*AppendEntriesResponse) Descriptor() ([]byte, []int) {
+	return file_proto_ingest_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *AppendEntriesResponse) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *AppendEntriesResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
 var File_proto_ingest_proto protoreflect.FileDescriptor
 
 const file_proto_ingest_proto_rawDesc = "" +
@@ -382,13 +611,30 @@ const file_proto_ingest_proto_rawDesc = "" +
 	"\x05found\x18\x01 \x01(\bR\x05found\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\x12\x16\n" +
 	"\x06source\x18\x03 \x01(\tR\x06source\x12-\n" +
-	"\x13received_at_unix_ns\x18\x04 \x01(\x03R\x10receivedAtUnixNs2K\n" +
+	"\x13received_at_unix_ns\x18\x04 \x01(\x03R\x10receivedAtUnixNs\"\x95\x01\n" +
+	"\x12RequestVoteRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x03R\x04term\x12!\n" +
+	"\fcandidate_id\x18\x02 \x01(\tR\vcandidateId\x12$\n" +
+	"\x0elast_log_index\x18\x03 \x01(\x03R\flastLogIndex\x12\"\n" +
+	"\rlast_log_term\x18\x04 \x01(\x03R\vlastLogTerm\"L\n" +
+	"\x13RequestVoteResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x03R\x04term\x12!\n" +
+	"\fvote_granted\x18\x02 \x01(\bR\vvoteGranted\"G\n" +
+	"\x14AppendEntriesRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x03R\x04term\x12\x1b\n" +
+	"\tleader_id\x18\x02 \x01(\tR\bleaderId\"E\n" +
+	"\x15AppendEntriesResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x03R\x04term\x12\x18\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess2K\n" +
 	"\x10IngestionService\x127\n" +
 	"\x06Ingest\x12\x15.ingest.IngestRequest\x1a\x16.ingest.IngestResponse2O\n" +
 	"\x12ReplicationService\x129\n" +
 	"\tStreamWAL\x12\x18.ingest.StreamWALRequest\x1a\x10.ingest.WALEntry0\x012;\n" +
 	"\tKVService\x12.\n" +
-	"\x03Get\x12\x12.ingest.GetRequest\x1a\x13.ingest.GetResponseB%Z#github.com/junyoung/core-x/proto/pbb\x06proto3"
+	"\x03Get\x12\x12.ingest.GetRequest\x1a\x13.ingest.GetResponse2\xa3\x01\n" +
+	"\vRaftService\x12F\n" +
+	"\vRequestVote\x12\x1a.ingest.RequestVoteRequest\x1a\x1b.ingest.RequestVoteResponse\x12L\n" +
+	"\rAppendEntries\x12\x1c.ingest.AppendEntriesRequest\x1a\x1d.ingest.AppendEntriesResponseB%Z#github.com/junyoung/core-x/proto/pbb\x06proto3"
 
 var (
 	file_proto_ingest_proto_rawDescOnce sync.Once
@@ -402,24 +648,32 @@ func file_proto_ingest_proto_rawDescGZIP() []byte {
 	return file_proto_ingest_proto_rawDescData
 }
 
-var file_proto_ingest_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_proto_ingest_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_proto_ingest_proto_goTypes = []any{
-	(*IngestRequest)(nil),    // 0: ingest.IngestRequest
-	(*IngestResponse)(nil),   // 1: ingest.IngestResponse
-	(*StreamWALRequest)(nil), // 2: ingest.StreamWALRequest
-	(*WALEntry)(nil),         // 3: ingest.WALEntry
-	(*GetRequest)(nil),       // 4: ingest.GetRequest
-	(*GetResponse)(nil),      // 5: ingest.GetResponse
+	(*IngestRequest)(nil),         // 0: ingest.IngestRequest
+	(*IngestResponse)(nil),        // 1: ingest.IngestResponse
+	(*StreamWALRequest)(nil),      // 2: ingest.StreamWALRequest
+	(*WALEntry)(nil),              // 3: ingest.WALEntry
+	(*GetRequest)(nil),            // 4: ingest.GetRequest
+	(*GetResponse)(nil),           // 5: ingest.GetResponse
+	(*RequestVoteRequest)(nil),    // 6: ingest.RequestVoteRequest
+	(*RequestVoteResponse)(nil),   // 7: ingest.RequestVoteResponse
+	(*AppendEntriesRequest)(nil),  // 8: ingest.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil), // 9: ingest.AppendEntriesResponse
 }
 var file_proto_ingest_proto_depIdxs = []int32{
 	0, // 0: ingest.IngestionService.Ingest:input_type -> ingest.IngestRequest
 	2, // 1: ingest.ReplicationService.StreamWAL:input_type -> ingest.StreamWALRequest
 	4, // 2: ingest.KVService.Get:input_type -> ingest.GetRequest
-	1, // 3: ingest.IngestionService.Ingest:output_type -> ingest.IngestResponse
-	3, // 4: ingest.ReplicationService.StreamWAL:output_type -> ingest.WALEntry
-	5, // 5: ingest.KVService.Get:output_type -> ingest.GetResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
+	6, // 3: ingest.RaftService.RequestVote:input_type -> ingest.RequestVoteRequest
+	8, // 4: ingest.RaftService.AppendEntries:input_type -> ingest.AppendEntriesRequest
+	1, // 5: ingest.IngestionService.Ingest:output_type -> ingest.IngestResponse
+	3, // 6: ingest.ReplicationService.StreamWAL:output_type -> ingest.WALEntry
+	5, // 7: ingest.KVService.Get:output_type -> ingest.GetResponse
+	7, // 8: ingest.RaftService.RequestVote:output_type -> ingest.RequestVoteResponse
+	9, // 9: ingest.RaftService.AppendEntries:output_type -> ingest.AppendEntriesResponse
+	5, // [5:10] is the sub-list for method output_type
+	0, // [0:5] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -436,9 +690,9 @@ func file_proto_ingest_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_ingest_proto_rawDesc), len(file_proto_ingest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   10,
 			NumExtensions: 0,
-			NumServices:   3,
+			NumServices:   4,
 		},
 		GoTypes:           file_proto_ingest_proto_goTypes,
 		DependencyIndexes: file_proto_ingest_proto_depIdxs,
