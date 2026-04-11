@@ -40,3 +40,21 @@ message WALEntry {
   bytes raw_data    = 2;
   int64 record_size = 3;
 }
+
+// KVService provides point-lookup reads across cluster nodes.
+service KVService {
+  rpc Get(GetRequest) returns (GetResponse);
+}
+
+// GetRequest carries the key to look up.
+message GetRequest {
+  string key = 1;
+}
+
+// GetResponse carries the result of a KV lookup.
+message GetResponse {
+  bool   found              = 1;
+  bytes  payload            = 2;
+  string source             = 3;
+  int64  received_at_unix_ns = 4;
+}

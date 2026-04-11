@@ -109,6 +109,7 @@ type IngestionService struct {
 	submitter Submitter
 	pool      EventPool
 	walWriter WALWriter
+	metrics   IngestMetrics
 }
 
 // NewIngestionService 는 필수 포트와 선택적 포트를 주입받아 서비스를 생성한다.
@@ -126,6 +127,12 @@ func NewIngestionService(submitter Submitter, pool EventPool, walWriter WALWrite
 		pool:      pool,
 		walWriter: walWriter,
 	}
+}
+
+// SetMetrics attaches an IngestMetrics implementation.
+// Call once during wiring before first Ingest().
+func (s *IngestionService) SetMetrics(m IngestMetrics) {
+	s.metrics = m
 }
 
 // Ingest 는 핵심 유스케이스다: 트랜스포트 계층에서 원시 이벤트를 받아
@@ -156,6 +163,11 @@ func NewIngestionService(submitter Submitter, pool EventPool, walWriter WALWrite
 //   - nil 반환: Event가 jobCh에 성공적으로 enqueue되었음. 처리는 비동기.
 //   - error 반환: Event가 풀로 반환되었음. 누출 없음. 에러 종류에 따라 재시도 또는 429 반환.
 func (s *IngestionService) Ingest(source, payload string) error {
+	var start time.Time
+	if s.metrics != nil {
+		start = time.Now()
+	}
+
 	e := s.pool.Acquire()
 	e.ReceivedAt = time.Now()
 	e.Source = source
@@ -165,6 +177,9 @@ func (s *IngestionService) Ingest(source, payload string) error {
 	if s.walWriter != nil {
 		if err := s.walWriter.WriteEvent(e); err != nil {
 			s.pool.Release(e)
+			if s.metrics != nil {
+				s.metrics.RecordIngest("wal_error", time.Since(start).Seconds())
+			}
 			return fmt.Errorf("wal write failed: %w", err)
 		}
 	}
@@ -172,9 +187,15 @@ func (s *IngestionService) Ingest(source, payload string) error {
 	// Submitter에 enqueue 시도.
 	if !s.submitter.Submit(e) {
 		s.pool.Release(e) // 풀 객체를 절대 누출하지 않는다: 거절 즉시 반환
+		if s.metrics != nil {
+			s.metrics.RecordIngest("overloaded", time.Since(start).Seconds())
+		}
 		return ErrOverloaded
 	}
 
+	if s.metrics != nil {
+		s.metrics.RecordIngest("ok", time.Since(start).Seconds())
+	}
 	return nil
 }
 

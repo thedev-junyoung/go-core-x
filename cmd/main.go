@@ -51,6 +51,7 @@ import (
 	"github.com/junyoung/core-x/internal/infrastructure/executor"
 	infragrpc "github.com/junyoung/core-x/internal/infrastructure/grpc"
 	infrahttp "github.com/junyoung/core-x/internal/infrastructure/http"
+	inframetrics "github.com/junyoung/core-x/internal/infrastructure/metrics"
 	"github.com/junyoung/core-x/internal/infrastructure/pool"
 	infrareplication "github.com/junyoung/core-x/internal/infrastructure/replication"
 	kvstore "github.com/junyoung/core-x/internal/infrastructure/storage/kv"
@@ -94,6 +95,10 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
+
+	// --- Observability: Prometheus Metrics ------------------------------------
+	promReg := inframetrics.NewRegistry()
+	ingestMetrics := inframetrics.NewPromIngestMetrics(promReg)
 
 	slog.Info("starting core-x ingestion engine",
 		"addr", addr,
@@ -213,6 +218,18 @@ func main() {
 	// IngestionService.Ingest() → kvStore.WriteEvent() → WAL 기록 + index 업데이트.
 	// KVStore는 내부적으로 walWriter를 사용하여 투명하게 WAL 기록 + index를 처리한다.
 	svc := appingestion.NewIngestionService(workerPool, eventPool, kvStore)
+	svc.SetMetrics(ingestMetrics)
+
+	// Periodically update queue depth gauge for Prometheus.
+	// QueueDepth is a gauge (not a counter), so it must be polled.
+	// 5s interval: low overhead, sufficient resolution for alerting.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			ingestMetrics.RecordQueueDepth(workerPool.QueueDepth())
+		}
+	}()
 
 	// --- Phase 3: 클러스터 초기화 -------------------------------------------
 	// CORE_X_NODE_ID가 설정되어 있으면 클러스터 모드로 동작한다.
@@ -329,9 +346,13 @@ func main() {
 		)
 	}
 
+	inframetrics.RegisterReplicationMetrics(promReg, replLag)
+	inframetrics.RegisterClusterMetrics(promReg, ring)
+
 	// gRPC 서버 goroutine은 replication 서비스 등록 이후에 시작한다.
 	// RegisterReplicationService → Serve 순서를 보장해 race를 제거한다.
 	if grpcSrv != nil {
+		grpcSrv.RegisterKVService(infragrpc.NewGRPCKVServer(kvStore))
 		go func() {
 			slog.Info("grpc server listening", "addr", grpcSrv.Addr)
 			if err := grpcSrv.Serve(); err != nil {
@@ -351,9 +372,13 @@ func main() {
 		ingestHandler = infrahttp.NewHTTPHandler(svc)
 	}
 
+	kvHandler := infrahttp.NewKVHandler(kvStore, ring, nodeID, forwarder)
+
 	mux := http.NewServeMux()
 	mux.Handle("POST /ingest", ingestHandler)
+	mux.Handle("GET /kv/{key}", kvHandler)
 	mux.HandleFunc("GET /stats", infrahttp.StatsHandler(workerPool, replLag))
+	mux.Handle("GET /metrics", inframetrics.NewHTTPHandler(promReg))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

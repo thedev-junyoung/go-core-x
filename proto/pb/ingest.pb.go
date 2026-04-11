@@ -241,6 +241,120 @@ func (x *WALEntry) GetRecordSize() int64 {
 	return 0
 }
 
+// GetRequest carries the key to look up.
+type GetRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRequest) Reset() {
+	*x = GetRequest{}
+	mi := &file_proto_ingest_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRequest) ProtoMessage() {}
+
+func (x *GetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_ingest_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
+func (*GetRequest) Descriptor() ([]byte, []int) {
+	return file_proto_ingest_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *GetRequest) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+// GetResponse carries the result of a KV lookup.
+type GetResponse struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Found            bool                   `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
+	Payload          []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
+	Source           string                 `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
+	ReceivedAtUnixNs int64                  `protobuf:"varint,4,opt,name=received_at_unix_ns,json=receivedAtUnixNs,proto3" json:"received_at_unix_ns,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *GetResponse) Reset() {
+	*x = GetResponse{}
+	mi := &file_proto_ingest_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetResponse) ProtoMessage() {}
+
+func (x *GetResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_ingest_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetResponse.ProtoReflect.Descriptor instead.
+func (*GetResponse) Descriptor() ([]byte, []int) {
+	return file_proto_ingest_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *GetResponse) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
+
+func (x *GetResponse) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *GetResponse) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *GetResponse) GetReceivedAtUnixNs() int64 {
+	if x != nil {
+		return x.ReceivedAtUnixNs
+	}
+	return 0
+}
+
 var File_proto_ingest_proto protoreflect.FileDescriptor
 
 const file_proto_ingest_proto_rawDesc = "" +
@@ -260,11 +374,21 @@ const file_proto_ingest_proto_rawDesc = "" +
 	"\x06offset\x18\x01 \x01(\x03R\x06offset\x12\x19\n" +
 	"\braw_data\x18\x02 \x01(\fR\arawData\x12\x1f\n" +
 	"\vrecord_size\x18\x03 \x01(\x03R\n" +
-	"recordSize2K\n" +
+	"recordSize\"\x1e\n" +
+	"\n" +
+	"GetRequest\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\"\x84\x01\n" +
+	"\vGetResponse\x12\x14\n" +
+	"\x05found\x18\x01 \x01(\bR\x05found\x12\x18\n" +
+	"\apayload\x18\x02 \x01(\fR\apayload\x12\x16\n" +
+	"\x06source\x18\x03 \x01(\tR\x06source\x12-\n" +
+	"\x13received_at_unix_ns\x18\x04 \x01(\x03R\x10receivedAtUnixNs2K\n" +
 	"\x10IngestionService\x127\n" +
 	"\x06Ingest\x12\x15.ingest.IngestRequest\x1a\x16.ingest.IngestResponse2O\n" +
 	"\x12ReplicationService\x129\n" +
-	"\tStreamWAL\x12\x18.ingest.StreamWALRequest\x1a\x10.ingest.WALEntry0\x01B%Z#github.com/junyoung/core-x/proto/pbb\x06proto3"
+	"\tStreamWAL\x12\x18.ingest.StreamWALRequest\x1a\x10.ingest.WALEntry0\x012;\n" +
+	"\tKVService\x12.\n" +
+	"\x03Get\x12\x12.ingest.GetRequest\x1a\x13.ingest.GetResponseB%Z#github.com/junyoung/core-x/proto/pbb\x06proto3"
 
 var (
 	file_proto_ingest_proto_rawDescOnce sync.Once
@@ -278,20 +402,24 @@ func file_proto_ingest_proto_rawDescGZIP() []byte {
 	return file_proto_ingest_proto_rawDescData
 }
 
-var file_proto_ingest_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proto_ingest_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_ingest_proto_goTypes = []any{
 	(*IngestRequest)(nil),    // 0: ingest.IngestRequest
 	(*IngestResponse)(nil),   // 1: ingest.IngestResponse
 	(*StreamWALRequest)(nil), // 2: ingest.StreamWALRequest
 	(*WALEntry)(nil),         // 3: ingest.WALEntry
+	(*GetRequest)(nil),       // 4: ingest.GetRequest
+	(*GetResponse)(nil),      // 5: ingest.GetResponse
 }
 var file_proto_ingest_proto_depIdxs = []int32{
 	0, // 0: ingest.IngestionService.Ingest:input_type -> ingest.IngestRequest
 	2, // 1: ingest.ReplicationService.StreamWAL:input_type -> ingest.StreamWALRequest
-	1, // 2: ingest.IngestionService.Ingest:output_type -> ingest.IngestResponse
-	3, // 3: ingest.ReplicationService.StreamWAL:output_type -> ingest.WALEntry
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
+	4, // 2: ingest.KVService.Get:input_type -> ingest.GetRequest
+	1, // 3: ingest.IngestionService.Ingest:output_type -> ingest.IngestResponse
+	3, // 4: ingest.ReplicationService.StreamWAL:output_type -> ingest.WALEntry
+	5, // 5: ingest.KVService.Get:output_type -> ingest.GetResponse
+	3, // [3:6] is the sub-list for method output_type
+	0, // [0:3] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -308,9 +436,9 @@ func file_proto_ingest_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_ingest_proto_rawDesc), len(file_proto_ingest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   3,
 		},
 		GoTypes:           file_proto_ingest_proto_goTypes,
 		DependencyIndexes: file_proto_ingest_proto_depIdxs,

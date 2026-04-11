@@ -26,25 +26,43 @@ func NewClientPool() *ClientPool {
 	return &ClientPool{conns: make(map[string]*grpc.ClientConn)}
 }
 
-// Get returns an IngestionServiceClient for the given node, creating the
-// underlying connection if it does not exist yet.
-func (p *ClientPool) Get(node *cluster.Node) (pb.IngestionServiceClient, error) {
+// conn returns the underlying *grpc.ClientConn for node, creating it if needed.
+func (p *ClientPool) conn(node *cluster.Node) (*grpc.ClientConn, error) {
 	p.mu.Lock()
-	conn, ok := p.conns[node.ID]
+	defer p.mu.Unlock()
+	c, ok := p.conns[node.ID]
 	if !ok {
 		var err error
-		conn, err = grpc.NewClient(
+		c, err = grpc.NewClient(
 			node.Addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 		)
 		if err != nil {
-			p.mu.Unlock()
 			return nil, fmt.Errorf("grpc dial %s: %w", node.Addr, err)
 		}
-		p.conns[node.ID] = conn
+		p.conns[node.ID] = c
 	}
-	p.mu.Unlock()
-	return pb.NewIngestionServiceClient(conn), nil
+	return c, nil
+}
+
+// Get returns an IngestionServiceClient for the given node, creating the
+// underlying connection if it does not exist yet.
+func (p *ClientPool) Get(node *cluster.Node) (pb.IngestionServiceClient, error) {
+	c, err := p.conn(node)
+	if err != nil {
+		return nil, err
+	}
+	return pb.NewIngestionServiceClient(c), nil
+}
+
+// GetKVClient returns a KVServiceClient for the given node, creating the
+// underlying connection if it does not exist yet.
+func (p *ClientPool) GetKVClient(node *cluster.Node) (pb.KVServiceClient, error) {
+	c, err := p.conn(node)
+	if err != nil {
+		return nil, err
+	}
+	return pb.NewKVServiceClient(c), nil
 }
 
 // Remove closes and removes the connection for a node.

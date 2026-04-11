@@ -83,3 +83,9 @@ func (s *Server) Stop() {
 func (s *Server) RegisterReplicationService(srv pb.ReplicationServiceServer) {
 	pb.RegisterReplicationServiceServer(s.grpcServer, srv)
 }
+
+// RegisterKVService registers a KVService implementation.
+// Must be called before Serve().
+func (s *Server) RegisterKVService(srv pb.KVServiceServer) {
+	pb.RegisterKVServiceServer(s.grpcServer, srv)
+}

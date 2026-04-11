@@ -39,3 +39,16 @@ func (f *Forwarder) Forward(ctx context.Context, node *cluster.Node, source stri
 	}
 	return nil
 }
+
+// ForwardGet forwards a KV Get request to a peer node.
+func (f *Forwarder) ForwardGet(ctx context.Context, node *cluster.Node, key string) (*pb.GetResponse, error) {
+	client, err := f.pool.GetKVClient(node)
+	if err != nil {
+		return nil, fmt.Errorf("forward get client: %w", err)
+	}
+	resp, err := client.Get(ctx, &pb.GetRequest{Key: key})
+	if err != nil {
+		return nil, fmt.Errorf("forward get rpc: %w", err)
+	}
+	return resp, nil
+}
