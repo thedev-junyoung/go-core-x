@@ -103,6 +103,12 @@ type Writer struct {
 	// SyncInterval 정책용 필드
 	syncDone chan struct{}
 	syncWg   sync.WaitGroup
+
+	// compactionCh is closed by RunExclusiveSwap to notify listeners (e.g. replication
+	// streamer) that the WAL file has been atomically swapped. A new channel is
+	// assigned after each swap.
+	compactionCh chan struct{}
+	compactionMu sync.Mutex
 }
 
 // NewWriter는 WAL 파일을 열고 Writer를 생성한다.
@@ -130,8 +136,9 @@ func NewWriter(cfg Config) (*Writer, error) {
 	}
 
 	w := &Writer{
-		file: f,
-		cfg:  cfg,
+		file:         f,
+		cfg:          cfg,
+		compactionCh: make(chan struct{}),
 		bufPool: sync.Pool{
 			New: func() any {
 				// 초기 용량: 헤더(16) + 일반적인 페이로드(256) + 체크섬(4)
@@ -348,6 +355,15 @@ func (w *Writer) Close() error {
 	return nil
 }
 
+// CompactionNotify returns a channel that is closed when RunExclusiveSwap
+// completes a WAL file swap. A new channel is issued after each swap, so
+// callers must re-call CompactionNotify after receiving the signal.
+func (w *Writer) CompactionNotify() <-chan struct{} {
+	w.compactionMu.Lock()
+	defer w.compactionMu.Unlock()
+	return w.compactionCh
+}
+
 // RunExclusiveSwap pauses all writes and runs fn under the writer's lock.
 //
 // fn must return (newFile, newSize, error). On success, the writer atomically
@@ -364,6 +380,13 @@ func (w *Writer) RunExclusiveSwap(fn func() (*os.File, int64, error)) error {
 	if err != nil {
 		return err
 	}
+
+	// Signal compaction listeners and replace the channel.
+	w.compactionMu.Lock()
+	oldCh := w.compactionCh
+	w.compactionCh = make(chan struct{})
+	w.compactionMu.Unlock()
+	close(oldCh)
 
 	old := w.file
 	w.file = newFile
