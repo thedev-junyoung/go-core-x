@@ -89,3 +89,9 @@ func (s *Server) RegisterReplicationService(srv pb.ReplicationServiceServer) {
 func (s *Server) RegisterKVService(srv pb.KVServiceServer) {
 	pb.RegisterKVServiceServer(s.grpcServer, srv)
 }
+
+// RegisterRaftService registers a RaftService implementation.
+// Must be called before Serve().
+func (s *Server) RegisterRaftService(srv pb.RaftServiceServer) {
+	pb.RegisterRaftServiceServer(s.grpcServer, srv)
+}

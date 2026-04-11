@@ -52,6 +52,7 @@ import (
 	infragrpc "github.com/junyoung/core-x/internal/infrastructure/grpc"
 	infrahttp "github.com/junyoung/core-x/internal/infrastructure/http"
 	inframetrics "github.com/junyoung/core-x/internal/infrastructure/metrics"
+	infraraft "github.com/junyoung/core-x/internal/infrastructure/raft"
 	"github.com/junyoung/core-x/internal/infrastructure/pool"
 	infrareplication "github.com/junyoung/core-x/internal/infrastructure/replication"
 	kvstore "github.com/junyoung/core-x/internal/infrastructure/storage/kv"
@@ -346,8 +347,47 @@ func main() {
 		)
 	}
 
+	// --- Phase 5a: Raft Leader Election ------------------------------------
+	// Raft is only activated in cluster mode (nodeID + grpcAddr + grpcSrv configured).
+	// Standalone mode skips Raft entirely.
+	var raftNode *infraraft.RaftNode
+
+	if nodeID != "" && grpcAddr != "" && grpcSrv != nil {
+		var peerAddrs []string
+		if ring != nil {
+			for _, n := range ring.Nodes() {
+				if n.ID != nodeID {
+					peerAddrs = append(peerAddrs, n.Addr)
+				}
+			}
+		}
+
+		var peerClients *infraraft.PeerClients
+		if len(peerAddrs) > 0 {
+			var pcErr error
+			peerClients, pcErr = infraraft.NewPeerClients(peerAddrs)
+			if pcErr != nil {
+				slog.Error("raft: failed to dial peers", "err", pcErr)
+				os.Exit(1)
+			}
+			defer peerClients.Close()
+		}
+
+		raftNode = infraraft.NewRaftNode(nodeID, peerClients)
+		raftServer := infraraft.NewRaftServer(raftNode)
+		grpcSrv.RegisterRaftService(raftServer)
+
+		raftCtx, raftCancel := context.WithCancel(context.Background())
+		defer raftCancel()
+
+		go raftNode.Run(raftCtx)
+
+		slog.Info("raft: started", "node_id", nodeID, "peers", peerAddrs)
+	}
+
 	inframetrics.RegisterReplicationMetrics(promReg, replLag)
 	inframetrics.RegisterClusterMetrics(promReg, ring)
+	inframetrics.RegisterRaftMetrics(promReg, raftNode)
 
 	// gRPC 서버 goroutine은 replication 서비스 등록 이후에 시작한다.
 	// RegisterReplicationService → Serve 순서를 보장해 race를 제거한다.
