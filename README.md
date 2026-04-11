@@ -327,10 +327,10 @@ POST /ingest {source: "user-x", payload: "..."}
 - [x] Crash Recovery with WAL replay
 - [x] WAL Compaction (stop-the-world, atomic rename)
 
-### Phase 3: Distributed Scalability (In Progress)
+### Phase 3: Distributed Scalability ✅ COMPLETE
 - [x] Node-to-Node Communication (gRPC) — `infrastructure/grpc/`
 - [x] Consistent Hashing for Partitioning — Virtual Nodes, `infrastructure/cluster/`
-- [ ] Basic Replication — Primary→Replica async WAL streaming
+- [x] Basic Replication — Primary→Replica async WAL streaming — `infrastructure/replication/`
 
 ### Phase 4: Intelligence & Observability (Ongoing)
 - [ ] Custom Metrics & Dashboard
@@ -353,8 +353,9 @@ POST /ingest {source: "user-x", payload: "..."}
 - [ADR-005: Hash Index KV Store (Bitcask Model)](docs/adr/0005-hash-index-kv-store-bitcask.md)
 - [ADR-006: WAL Compaction](docs/adr/0006-wal-compaction.md) ← Phase 2 완성
 
-### Phase 3 (In Progress)
+### Phase 3 (Complete)
 - [ADR-007: Distributed Partitioning — gRPC + Virtual Nodes Consistent Hashing](docs/adr/0007-distributed-partitioning-grpc-consistent-hashing.md)
+- [ADR-008: Basic Replication — Async WAL Streaming](docs/adr/0008-basic-replication-async-wal-streaming.md)
 
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 
@@ -362,6 +363,6 @@ POST /ingest {source: "user-x", payload: "..."}
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Current Status**: Phase 3 In Progress (2026-04-10)
-- **Completed**: Phase 3a — gRPC Node Communication + Virtual Nodes Consistent Hashing
-- **Next**: Phase 3b — Basic Replication (Primary → Replica async WAL streaming)
+- **Current Status**: Phase 3 Complete (2026-04-11)
+- **Completed**: Phase 3 — gRPC + Consistent Hashing + Basic Replication
+- **Next**: Phase 4 — Intelligence & Observability

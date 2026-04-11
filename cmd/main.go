@@ -329,8 +329,6 @@ func main() {
 		)
 	}
 
-	_ = replLag // used by StatsHandler in Task 10
-
 	// --- HTTP 라우터 (HTTP Router) -------------------------------------------
 	// 순수 stdlib ServeMux. 미들웨어 프레임워크 없음.
 	// 크로스커팅 관심사(인증, 추적)는 필요 시 http.Handler 래퍼로 구현된다 —
@@ -344,7 +342,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /ingest", ingestHandler)
-	mux.HandleFunc("GET /stats", infrahttp.StatsHandler(workerPool))
+	mux.HandleFunc("GET /stats", infrahttp.StatsHandler(workerPool, replLag))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
