@@ -127,6 +127,120 @@ func (x *IngestResponse) GetMessage() string {
 	return ""
 }
 
+// StreamWALRequest is sent once by the replica to open the stream.
+type StreamWALRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ReplicaId     string                 `protobuf:"bytes,1,opt,name=replica_id,json=replicaId,proto3" json:"replica_id,omitempty"`
+	StartOffset   int64                  `protobuf:"varint,2,opt,name=start_offset,json=startOffset,proto3" json:"start_offset,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamWALRequest) Reset() {
+	*x = StreamWALRequest{}
+	mi := &file_proto_ingest_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamWALRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamWALRequest) ProtoMessage() {}
+
+func (x *StreamWALRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_ingest_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamWALRequest.ProtoReflect.Descriptor instead.
+func (*StreamWALRequest) Descriptor() ([]byte, []int) {
+	return file_proto_ingest_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *StreamWALRequest) GetReplicaId() string {
+	if x != nil {
+		return x.ReplicaId
+	}
+	return ""
+}
+
+func (x *StreamWALRequest) GetStartOffset() int64 {
+	if x != nil {
+		return x.StartOffset
+	}
+	return 0
+}
+
+// WALEntry is a single replicated WAL record.
+type WALEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Offset        int64                  `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`
+	RawData       []byte                 `protobuf:"bytes,2,opt,name=raw_data,json=rawData,proto3" json:"raw_data,omitempty"`
+	RecordSize    int64                  `protobuf:"varint,3,opt,name=record_size,json=recordSize,proto3" json:"record_size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WALEntry) Reset() {
+	*x = WALEntry{}
+	mi := &file_proto_ingest_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WALEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WALEntry) ProtoMessage() {}
+
+func (x *WALEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_ingest_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WALEntry.ProtoReflect.Descriptor instead.
+func (*WALEntry) Descriptor() ([]byte, []int) {
+	return file_proto_ingest_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *WALEntry) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *WALEntry) GetRawData() []byte {
+	if x != nil {
+		return x.RawData
+	}
+	return nil
+}
+
+func (x *WALEntry) GetRecordSize() int64 {
+	if x != nil {
+		return x.RecordSize
+	}
+	return 0
+}
+
 var File_proto_ingest_proto protoreflect.FileDescriptor
 
 const file_proto_ingest_proto_rawDesc = "" +
@@ -137,9 +251,20 @@ const file_proto_ingest_proto_rawDesc = "" +
 	"\apayload\x18\x02 \x01(\fR\apayload\":\n" +
 	"\x0eIngestResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage2K\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"T\n" +
+	"\x10StreamWALRequest\x12\x1d\n" +
+	"\n" +
+	"replica_id\x18\x01 \x01(\tR\treplicaId\x12!\n" +
+	"\fstart_offset\x18\x02 \x01(\x03R\vstartOffset\"^\n" +
+	"\bWALEntry\x12\x16\n" +
+	"\x06offset\x18\x01 \x01(\x03R\x06offset\x12\x19\n" +
+	"\braw_data\x18\x02 \x01(\fR\arawData\x12\x1f\n" +
+	"\vrecord_size\x18\x03 \x01(\x03R\n" +
+	"recordSize2K\n" +
 	"\x10IngestionService\x127\n" +
-	"\x06Ingest\x12\x15.ingest.IngestRequest\x1a\x16.ingest.IngestResponseB%Z#github.com/junyoung/core-x/proto/pbb\x06proto3"
+	"\x06Ingest\x12\x15.ingest.IngestRequest\x1a\x16.ingest.IngestResponse2O\n" +
+	"\x12ReplicationService\x129\n" +
+	"\tStreamWAL\x12\x18.ingest.StreamWALRequest\x1a\x10.ingest.WALEntry0\x01B%Z#github.com/junyoung/core-x/proto/pbb\x06proto3"
 
 var (
 	file_proto_ingest_proto_rawDescOnce sync.Once
@@ -153,16 +278,20 @@ func file_proto_ingest_proto_rawDescGZIP() []byte {
 	return file_proto_ingest_proto_rawDescData
 }
 
-var file_proto_ingest_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_proto_ingest_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_proto_ingest_proto_goTypes = []any{
-	(*IngestRequest)(nil),  // 0: ingest.IngestRequest
-	(*IngestResponse)(nil), // 1: ingest.IngestResponse
+	(*IngestRequest)(nil),    // 0: ingest.IngestRequest
+	(*IngestResponse)(nil),   // 1: ingest.IngestResponse
+	(*StreamWALRequest)(nil), // 2: ingest.StreamWALRequest
+	(*WALEntry)(nil),         // 3: ingest.WALEntry
 }
 var file_proto_ingest_proto_depIdxs = []int32{
 	0, // 0: ingest.IngestionService.Ingest:input_type -> ingest.IngestRequest
-	1, // 1: ingest.IngestionService.Ingest:output_type -> ingest.IngestResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
+	2, // 1: ingest.ReplicationService.StreamWAL:input_type -> ingest.StreamWALRequest
+	1, // 2: ingest.IngestionService.Ingest:output_type -> ingest.IngestResponse
+	3, // 3: ingest.ReplicationService.StreamWAL:output_type -> ingest.WALEntry
+	2, // [2:4] is the sub-list for method output_type
+	0, // [0:2] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -179,9 +308,9 @@ func file_proto_ingest_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_ingest_proto_rawDesc), len(file_proto_ingest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_proto_ingest_proto_goTypes,
 		DependencyIndexes: file_proto_ingest_proto_depIdxs,

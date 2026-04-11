@@ -77,3 +77,9 @@ func (s *Server) Serve() error {
 func (s *Server) Stop() {
 	s.grpcServer.GracefulStop()
 }
+
+// RegisterReplicationService registers a ReplicationService implementation
+// with the underlying gRPC server. Must be called before Serve().
+func (s *Server) RegisterReplicationService(srv pb.ReplicationServiceServer) {
+	pb.RegisterReplicationServiceServer(s.grpcServer, srv)
+}
