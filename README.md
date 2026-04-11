@@ -332,10 +332,22 @@ POST /ingest {source: "user-x", payload: "..."}
 - [x] Consistent Hashing for Partitioning — Virtual Nodes, `infrastructure/cluster/`
 - [x] Basic Replication — Primary→Replica async WAL streaming — `infrastructure/replication/`
 
-### Phase 4: Intelligence & Observability (Ongoing)
-- [ ] Custom Metrics & Dashboard
-- [ ] AI Agent Integration for Log Analysis
-- [ ] Automated Fault Injection Testing
+### Phase 4: Intelligence & Observability ✅ COMPLETE (2026-04-11)
+- [x] Read Path — `GET /kv/{key}` with ring-aware routing
+- [x] Prometheus Metrics — ingest/replication/cluster 게이지 + 카운터
+- [x] `/metrics` 엔드포인트 (Prometheus scrape)
+
+### Phase 5a: Raft Leader Election ✅ COMPLETE (2026-04-11)
+- [x] Raft 상태 머신 — Follower / Candidate / Leader
+- [x] RequestVote + AppendEntries(heartbeat) gRPC RPC
+- [x] 자동 리더 선출 (election timeout 150–300ms, randomized)
+- [x] Prometheus 메트릭 — `core_x_raft_term`, `core_x_raft_is_leader`
+- [x] 클러스터 모드에서 RaftNode 자동 시작
+
+### Phase 5b: Raft Log Replication (Next)
+- [ ] AppendEntries에 WAL log entries 포함
+- [ ] Raft commit index 추적
+- [ ] Raft Leader → replication Primary 자동 승격 연결
 
 ---
 
@@ -357,12 +369,18 @@ POST /ingest {source: "user-x", payload: "..."}
 - [ADR-007: Distributed Partitioning — gRPC + Virtual Nodes Consistent Hashing](docs/adr/0007-distributed-partitioning-grpc-consistent-hashing.md)
 - [ADR-008: Basic Replication — Async WAL Streaming](docs/adr/0008-basic-replication-async-wal-streaming.md)
 
+### Phase 4 (Complete)
+- [ADR-009: Read Path & Observability](docs/adr/0009-read-path-and-observability.md)
+
+### Phase 5a (Complete)
+- [ADR-010: Raft 리더 선출](docs/adr/0010-raft-leader-election.md)
+
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 
 ---
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Current Status**: Phase 3 Complete (2026-04-11)
-- **Completed**: Phase 3 — gRPC + Consistent Hashing + Basic Replication
-- **Next**: Phase 4 — Intelligence & Observability
+- **Current Status**: Phase 5a Complete (2026-04-11)
+- **Completed**: Phase 5a — Raft Leader Election
+- **Next**: Phase 5b — Raft Log Replication
