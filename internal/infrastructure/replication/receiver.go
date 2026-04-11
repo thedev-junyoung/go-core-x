@@ -50,7 +50,9 @@ func (r *Receiver) Close() error {
 	defer r.mu.Unlock()
 
 	if r.file != nil {
-		return r.file.Close()
+		err := r.file.Close()
+		r.file = nil
+		return err
 	}
 	return nil
 }

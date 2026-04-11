@@ -54,7 +54,9 @@ func (c *ReplicationClient) Run(ctx context.Context) error {
 			)
 		}
 
-		c.lag.IncReconnect()
+		if ctx.Err() == nil {
+			c.lag.IncReconnect()
+		}
 
 		select {
 		case <-ctx.Done():

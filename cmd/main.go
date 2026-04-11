@@ -258,12 +258,6 @@ func main() {
 			slog.Error("failed to start grpc server", "addr", grpcAddr, "err", grpcErr)
 			os.Exit(1)
 		}
-		go func() {
-			slog.Info("grpc server listening", "addr", grpcSrv.Addr)
-			if err := grpcSrv.Serve(); err != nil {
-				slog.Error("grpc server error", "err", err)
-			}
-		}()
 
 		slog.Info("cluster mode enabled",
 			"node_id", nodeID,
@@ -276,7 +270,12 @@ func main() {
 	// --- Phase 3b: Replication 초기화 ------------------------------------------
 	var replLag *infrareplication.ReplicationLag
 
-	if role == cluster.RolePrimary && grpcSrv != nil {
+	if role == cluster.RolePrimary {
+		if grpcSrv == nil {
+			slog.Error("replication: primary role requires CORE_X_NODE_ID and CORE_X_GRPC_ADDR to be set")
+			os.Exit(1)
+		}
+
 		replLag = infrareplication.NewReplicationLag()
 
 		walReadFile, err := os.Open(walPath)
@@ -284,6 +283,7 @@ func main() {
 			slog.Error("replication: failed to open wal for streaming", "path", walPath, "err", err)
 			os.Exit(1)
 		}
+		defer walReadFile.Close()
 
 		streamer := infrareplication.NewStreamer(walReadFile, walWriter.CompactionNotify, replLag, 10*time.Millisecond)
 		replServer := infrareplication.NewReplicationServer(streamer)
@@ -327,6 +327,17 @@ func main() {
 			"primary_addr", primaryAddr,
 			"replica_wal_path", replicaWALPath,
 		)
+	}
+
+	// gRPC 서버 goroutine은 replication 서비스 등록 이후에 시작한다.
+	// RegisterReplicationService → Serve 순서를 보장해 race를 제거한다.
+	if grpcSrv != nil {
+		go func() {
+			slog.Info("grpc server listening", "addr", grpcSrv.Addr)
+			if err := grpcSrv.Serve(); err != nil {
+				slog.Error("grpc server error", "err", err)
+			}
+		}()
 	}
 
 	// --- HTTP 라우터 (HTTP Router) -------------------------------------------
