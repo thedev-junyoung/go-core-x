@@ -29,7 +29,12 @@
       "Bash(kill 42144)",
       "Bash(rm -f /tmp/core-x-integ.wal)",
       "Bash(CORE_X_BINARY=/tmp/core-x-bin go test ./tools/chaos/... -v -timeout 120s 2>&1)",
-      "Bash(xargs file:*)"
+      "Bash(xargs file:*)",
+      "Bash(cat ~/workspace/personal/core-x/docs/adr/*.md)",
+      "Bash(git check-ignore:*)",
+      "Bash(cat ~/workspace/personal/core-x/.worktrees/phase5a-raft-election/scripts/*.sh)",
+      "Bash(git -C ~/workspace/personal/core-x/.worktrees/phase5a-raft-election add proto/ingest.proto proto/pb/ingest.pb.go proto/pb/ingest_grpc.pb.go)",
+      "Bash(git -C:*)"
     ]
   },
   "commands": {
