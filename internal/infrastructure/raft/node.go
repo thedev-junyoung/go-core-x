@@ -238,6 +238,8 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 	n.mu.Lock()
 	n.currentTerm++
 	term := n.currentTerm
+	lastLogIndex := n.lastLogIndex
+	lastLogTerm := n.lastLogTerm
 	n.votedFor = n.id
 	n.role = RoleCandidate
 	n.mu.Unlock()
@@ -261,7 +263,7 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 	for _, peer := range peers {
 		peer := peer
 		go func() {
-			resp, err := peer.RequestVote(term, n.id, 0, 0)
+			resp, err := peer.RequestVote(term, n.id, lastLogIndex, lastLogTerm)
 			if err != nil {
 				resultCh <- voteResult{}
 				return
