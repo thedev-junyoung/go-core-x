@@ -29,19 +29,35 @@ type RaftNode struct {
 	lastLogIndex int64
 	lastLogTerm  int64
 
+	// meta persists currentTerm and votedFor across restarts (Raft §5 persistent
+	// state). nil disables persistence — used in tests and single-node mode.
+	meta MetaStore
+
 	// resetCh is sent to from Handle* methods to reset the election timer.
 	// Buffer of 1: sender never blocks.
 	resetCh chan struct{}
 }
 
 // NewRaftNode creates a RaftNode. peers may be nil for single-node or test use.
-func NewRaftNode(id string, peers *PeerClients) *RaftNode {
-	return &RaftNode{
+// meta may be nil to disable persistence (tests, single-node mode). When non-nil,
+// the node restores currentTerm and votedFor from the store before Run() is called.
+func NewRaftNode(id string, peers *PeerClients, meta MetaStore) *RaftNode {
+	n := &RaftNode{
 		id:      id,
 		peers:   peers,
 		role:    RoleFollower,
+		meta:    meta,
 		resetCh: make(chan struct{}, 1),
 	}
+	if meta != nil {
+		if m, err := meta.Load(); err != nil {
+			slog.Error("raft: failed to load persistent metadata, starting from zero state", "err", err)
+		} else {
+			n.currentTerm = m.Term
+			n.votedFor = m.VotedFor
+		}
+	}
+	return n
 }
 
 // Role returns the current Raft role. Safe to call from any goroutine.
@@ -95,6 +111,11 @@ func (n *RaftNode) HandleAppendEntries(term int64, leaderID string) (currentTerm
 	if term > n.currentTerm {
 		n.currentTerm = term
 		n.votedFor = ""
+		if n.meta != nil {
+			if err := n.meta.Save(RaftMeta{Term: term, VotedFor: ""}); err != nil {
+				slog.Warn("raft: failed to persist term update from AppendEntries", "err", err)
+			}
+		}
 	}
 	n.role = RoleFollower
 
@@ -128,6 +149,11 @@ func (n *RaftNode) HandleRequestVote(term int64, candidateID string, lastLogInde
 		n.currentTerm = term
 		n.votedFor = ""
 		n.role = RoleFollower
+		if n.meta != nil {
+			if err := n.meta.Save(RaftMeta{Term: term, VotedFor: ""}); err != nil {
+				slog.Warn("raft: failed to persist term update from RequestVote", "err", err)
+			}
+		}
 	}
 
 	// §5.4.1: deny vote if candidate's log is behind ours.
@@ -137,6 +163,14 @@ func (n *RaftNode) HandleRequestVote(term int64, candidateID string, lastLogInde
 
 	// Grant vote if we haven't voted for anyone else this term.
 	if n.votedFor == "" || n.votedFor == candidateID {
+		// Persist before updating in-memory state: if Save fails, deny the vote
+		// to prevent a crash from causing double-voting (§5 persistent state).
+		if n.meta != nil {
+			if err := n.meta.Save(RaftMeta{Term: n.currentTerm, VotedFor: candidateID}); err != nil {
+				slog.Error("raft: failed to persist vote, denying to preserve safety", "err", err)
+				return n.currentTerm, false
+			}
+		}
 		n.votedFor = candidateID
 		// Reset election timer: we just heard from a valid Candidate.
 		select {
@@ -242,6 +276,18 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 	lastLogTerm := n.lastLogTerm
 	n.votedFor = n.id
 	n.role = RoleCandidate
+	if n.meta != nil {
+		if err := n.meta.Save(RaftMeta{Term: term, VotedFor: n.id}); err != nil {
+			// Cannot guarantee we won't re-vote in this term after a crash.
+			// Abort the election to avoid a potential safety violation.
+			slog.Error("raft: failed to persist candidate state, aborting election", "err", err)
+			n.currentTerm--
+			n.votedFor = ""
+			n.role = RoleFollower
+			n.mu.Unlock()
+			return
+		}
+	}
 	n.mu.Unlock()
 
 	slog.Info("raft: starting election", "id", n.id, "term", term)

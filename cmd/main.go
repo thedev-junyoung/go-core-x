@@ -373,7 +373,7 @@ func main() {
 			defer peerClients.Close()
 		}
 
-		raftNode = infraraft.NewRaftNode(nodeID, peerClients)
+		raftNode = infraraft.NewRaftNode(nodeID, peerClients, nil) // TODO(phase5b): inject FileMetaStore
 		raftServer := infraraft.NewRaftServer(raftNode)
 		grpcSrv.RegisterRaftService(raftServer)
 
