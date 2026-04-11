@@ -42,6 +42,9 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
 	appingestion "github.com/junyoung/core-x/internal/application/ingestion"
 	"github.com/junyoung/core-x/internal/domain"
 	"github.com/junyoung/core-x/internal/infrastructure/cluster"
@@ -49,6 +52,7 @@ import (
 	infragrpc "github.com/junyoung/core-x/internal/infrastructure/grpc"
 	infrahttp "github.com/junyoung/core-x/internal/infrastructure/http"
 	"github.com/junyoung/core-x/internal/infrastructure/pool"
+	infrareplication "github.com/junyoung/core-x/internal/infrastructure/replication"
 	kvstore "github.com/junyoung/core-x/internal/infrastructure/storage/kv"
 	"github.com/junyoung/core-x/internal/infrastructure/storage/wal"
 )
@@ -73,6 +77,15 @@ func main() {
 	if err != nil {
 		forwardTimeout = 3 * time.Second
 	}
+
+	// Phase 3b: Replication 설정.
+	role, err := cluster.RoleFromEnv()
+	if err != nil {
+		slog.Error("invalid CORE_X_ROLE", "err", err)
+		os.Exit(1)
+	}
+	primaryAddr := envOr("CORE_X_PRIMARY_ADDR", "")
+	replicaWALPath := envOr("CORE_X_REPLICA_WAL_PATH", "./data/replica.wal")
 
 	// --- 구조화 로깅 (Structured Logging) ------------------------------------
 	// slog (Go 1.21 stdlib): 외부 의존성 없음, 구조화 출력,
@@ -259,6 +272,64 @@ func main() {
 			"vnode_count", vnodeCount,
 		)
 	}
+
+	// --- Phase 3b: Replication 초기화 ------------------------------------------
+	var replLag *infrareplication.ReplicationLag
+
+	if role == cluster.RolePrimary && grpcSrv != nil {
+		replLag = infrareplication.NewReplicationLag()
+
+		walReadFile, err := os.Open(walPath)
+		if err != nil {
+			slog.Error("replication: failed to open wal for streaming", "path", walPath, "err", err)
+			os.Exit(1)
+		}
+
+		streamer := infrareplication.NewStreamer(walReadFile, walWriter.CompactionNotify, replLag, 10*time.Millisecond)
+		replServer := infrareplication.NewReplicationServer(streamer)
+		grpcSrv.RegisterReplicationService(replServer)
+
+		slog.Info("replication: primary mode enabled", "wal_path", walPath)
+
+	} else if role == cluster.RoleReplica {
+		replLag = infrareplication.NewReplicationLag()
+
+		replicaDir := filepath.Dir(replicaWALPath)
+		if err := os.MkdirAll(replicaDir, 0750); err != nil {
+			slog.Error("replication: failed to create replica wal dir", "err", err)
+			os.Exit(1)
+		}
+
+		receiver, err := infrareplication.NewReceiver(replicaWALPath)
+		if err != nil {
+			slog.Error("replication: failed to open replica wal", "path", replicaWALPath, "err", err)
+			os.Exit(1)
+		}
+
+		replClient := infrareplication.NewReplicationClient(
+			primaryAddr,
+			nodeID,
+			receiver,
+			replLag,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+
+		replCtx, replCancel := context.WithCancel(context.Background())
+		defer replCancel()
+
+		go func() {
+			if err := replClient.Run(replCtx); err != nil && replCtx.Err() == nil {
+				slog.Error("replication client stopped unexpectedly", "err", err)
+			}
+		}()
+
+		slog.Info("replication: replica mode enabled",
+			"primary_addr", primaryAddr,
+			"replica_wal_path", replicaWALPath,
+		)
+	}
+
+	_ = replLag // used by StatsHandler in Task 10
 
 	// --- HTTP 라우터 (HTTP Router) -------------------------------------------
 	// 순수 stdlib ServeMux. 미들웨어 프레임워크 없음.
