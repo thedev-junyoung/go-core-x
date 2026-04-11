@@ -125,6 +125,55 @@ func TestRaftNode_SingleNode_BecomesLeader(t *testing.T) {
 	t.Errorf("expected single node to become leader within 1s, final role: %v", node.Role())
 }
 
+// §5.4.1 Election Restriction tests.
+// These guard against a stale replica winning an election and overwriting
+// committed entries that it never received.
+
+func TestRaftNode_HandleRequestVote_StaleLogTerm_Denied(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil)
+	// Simulate node-1 having log up to (index=3, term=4).
+	node.ForceLog(3, 4)
+
+	// Candidate only has log up to (index=5, term=3) — longer but older term.
+	_, granted := node.HandleRequestVote(5, "node-2", 5, 3)
+	if granted {
+		t.Error("expected vote denied: candidate's lastLogTerm(3) < our lastLogTerm(4)")
+	}
+}
+
+func TestRaftNode_HandleRequestVote_SameTermShorterLog_Denied(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil)
+	// node-1 has (index=5, term=4).
+	node.ForceLog(5, 4)
+
+	// Candidate has (index=3, term=4) — same term but shorter log.
+	_, granted := node.HandleRequestVote(5, "node-2", 3, 4)
+	if granted {
+		t.Error("expected vote denied: same lastLogTerm but candidate lastLogIndex(3) < ours(5)")
+	}
+}
+
+func TestRaftNode_HandleRequestVote_SameTermEqualLog_Granted(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil)
+	node.ForceLog(5, 4)
+
+	_, granted := node.HandleRequestVote(5, "node-2", 5, 4)
+	if !granted {
+		t.Error("expected vote granted: candidate log identical to ours")
+	}
+}
+
+func TestRaftNode_HandleRequestVote_NewerLogTerm_Granted(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil)
+	node.ForceLog(10, 3)
+
+	// Candidate has shorter log but higher term — wins by §5.4.1 term rule.
+	_, granted := node.HandleRequestVote(5, "node-2", 2, 4)
+	if !granted {
+		t.Error("expected vote granted: candidate lastLogTerm(4) > our lastLogTerm(3)")
+	}
+}
+
 func TestRaftNode_HandleAppendEntries_ResetsToFollower_WhenLeader(t *testing.T) {
 	node := raft.NewRaftNode("node-1", nil)
 

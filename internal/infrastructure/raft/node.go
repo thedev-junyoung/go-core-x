@@ -23,6 +23,12 @@ type RaftNode struct {
 	votedFor    string   // nodeID that received our vote this term; "" = none
 	role        RaftRole
 
+	// lastLogIndex and lastLogTerm track the last entry in this node's log.
+	// Used for §5.4.1 election restriction. Both are 0 until Phase 5b adds
+	// actual log entries via HandleAppendEntries.
+	lastLogIndex int64
+	lastLogTerm  int64
+
 	// resetCh is sent to from Handle* methods to reset the election timer.
 	// Buffer of 1: sender never blocks.
 	resetCh chan struct{}
@@ -65,6 +71,15 @@ func (n *RaftNode) ForceRole(role RaftRole, term int64) {
 	n.currentTerm = term
 }
 
+// ForceLog sets lastLogIndex and lastLogTerm directly. Used only in tests
+// to simulate a node that has already applied log entries.
+func (n *RaftNode) ForceLog(lastLogIndex, lastLogTerm int64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.lastLogIndex = lastLogIndex
+	n.lastLogTerm = lastLogTerm
+}
+
 // HandleAppendEntries processes an incoming AppendEntries (heartbeat) RPC.
 // Implements RaftHandler.
 func (n *RaftNode) HandleAppendEntries(term int64, leaderID string) (currentTerm int64, success bool) {
@@ -94,8 +109,12 @@ func (n *RaftNode) HandleAppendEntries(term int64, leaderID string) (currentTerm
 
 // HandleRequestVote processes an incoming RequestVote RPC.
 // Implements RaftHandler.
-// lastLogIndex and lastLogTerm are used for log completeness check (Raft §5.4.1).
-// In Phase 5a all nodes have empty logs so these are always 0.
+//
+// Vote is granted only if both conditions hold (Raft §5.2 + §5.4.1):
+//  1. Term check: candidate's term ≥ our currentTerm.
+//  2. Log completeness (§5.4.1): candidate's log is at least as up-to-date
+//     as ours — prevents a stale replica from winning an election and
+//     overwriting committed entries.
 func (n *RaftNode) HandleRequestVote(term int64, candidateID string, lastLogIndex, lastLogTerm int64) (currentTerm int64, voteGranted bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -111,6 +130,11 @@ func (n *RaftNode) HandleRequestVote(term int64, candidateID string, lastLogInde
 		n.role = RoleFollower
 	}
 
+	// §5.4.1: deny vote if candidate's log is behind ours.
+	if !n.candidateLogUpToDate(lastLogIndex, lastLogTerm) {
+		return n.currentTerm, false
+	}
+
 	// Grant vote if we haven't voted for anyone else this term.
 	if n.votedFor == "" || n.votedFor == candidateID {
 		n.votedFor = candidateID
@@ -123,6 +147,25 @@ func (n *RaftNode) HandleRequestVote(term int64, candidateID string, lastLogInde
 	}
 
 	return n.currentTerm, false
+}
+
+// candidateLogUpToDate reports whether the candidate's log is at least as
+// up-to-date as this node's log (Raft §5.4.1).
+//
+// "More up-to-date" is defined by comparing the last entries:
+//   - Higher lastLogTerm wins unconditionally.
+//   - Equal lastLogTerm: longer log (higher lastLogIndex) wins.
+//
+// This is the invariant that guarantees a newly elected leader always holds
+// all committed entries — because any committed entry was replicated to a
+// majority, and a candidate needs votes from a majority, so at least one
+// voter in that majority has the entry and will deny votes to any candidate
+// that is missing it.
+func (n *RaftNode) candidateLogUpToDate(candidateLastLogIndex, candidateLastLogTerm int64) bool {
+	if candidateLastLogTerm != n.lastLogTerm {
+		return candidateLastLogTerm > n.lastLogTerm
+	}
+	return candidateLastLogIndex >= n.lastLogIndex
 }
 
 // Run starts the Raft state machine. Blocks until ctx is cancelled.
