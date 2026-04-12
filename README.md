@@ -361,13 +361,20 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 - [x] Prometheus 메트릭 — `core_x_raft_term`, `core_x_raft_is_leader`
 - [x] 클러스터 모드에서 RaftNode 자동 시작
 
-### Phase 5b: Raft Log Replication (In Progress)
-- [x] MetaStore — `raft_meta.bin` 영속화 (`currentTerm`, `votedFor`, CRC32 무결성) ✅
-- [x] §5.3 Log Matching — `AppendEntries` proto 확장, `prevLogIndex/prevLogTerm` 검증 ✅
-- [x] Fast Backup — `conflictIndex/conflictTerm` 기반 O(1) nextIndex 수렴 ✅
-- [x] `commitIndex` 추적 + §5.4.2 Current Term Only Commit ✅
-- [ ] RoleController — Raft 역할 변화를 ReplicationManager에 전달 (진행 중)
-- [ ] `cmd/main.go` 정적 `CORE_X_ROLE` → RoleController 전환
+### Phase 5b: Raft Log Replication ✅ COMPLETE (2026-04-12)
+- [x] MetaStore — `raft_meta.bin` 영속화 (`currentTerm`, `votedFor`, CRC32 무결성)
+- [x] §5.3 Log Matching — `AppendEntries` proto 확장, `prevLogIndex/prevLogTerm` 검증
+- [x] Fast Backup — `conflictIndex/conflictTerm` 기반 O(distinct terms) nextIndex 수렴
+- [x] `commitIndex` 추적 + §5.4.2 Current Term Only Commit
+- [x] RoleController — 50ms polling으로 Raft 역할 변화를 ReplicationManager에 전달
+- [x] ManagedReplicationServer — atomic flag null-object 패턴으로 gRPC 역할 전환
+- [x] `cmd/main.go` 정적 `CORE_X_ROLE` 제거 → RoleController 자동 전환
+
+### Phase 5c: WAL-Backed Log Persistence (Next)
+- [ ] `LogEntry` 슬라이스 → WAL append 기반 영속화
+- [ ] 재시작 시 WAL에서 Raft 로그 복구 (`lastLogIndex`, `lastLogTerm` 재건)
+- [ ] Log compaction 연동 — snapshot + truncate 지원
+- [ ] ADR-012: Raft 로그 영속화 설계 근거
 
 ---
 
@@ -395,7 +402,7 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 ### Phase 5a (Complete)
 - [ADR-010: Raft 리더 선출](docs/adr/0010-raft-leader-election.md)
 
-### Phase 5b (In Progress)
+### Phase 5b (Complete)
 - [ADR-011: Raft 메타데이터 영속화, §5.3 Log Replication, 역할 전환](docs/adr/011-raft-log-persistence-and-role-transition.md)
 
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
@@ -404,6 +411,6 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Current Status**: Phase 5b In Progress (2026-04-12)
-- **Completed**: Phase 5a — Raft Leader Election, Phase 5b (MetaStore + §5.3 Log Matching)
-- **Next**: Phase 5b RoleController → Phase 5c WAL 연동
+- **Current Status**: Phase 5c 진행 예정 (2026-04-12)
+- **Completed**: Phase 5a — Raft Leader Election, Phase 5b — Log Replication + Role Transition
+- **Next**: Phase 5c — WAL 연동으로 Raft 로그 영속화
