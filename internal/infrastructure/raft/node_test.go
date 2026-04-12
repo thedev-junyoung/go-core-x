@@ -29,7 +29,7 @@ func TestRaftRoleString(t *testing.T) {
 }
 
 func TestRaftNode_StartsAsFollower(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	if got := node.Role(); got != raft.RoleFollower {
 		t.Errorf("expected RoleFollower, got %v", got)
 	}
@@ -39,7 +39,7 @@ func TestRaftNode_StartsAsFollower(t *testing.T) {
 }
 
 func TestRaftNode_HandleAppendEntries_HigherTerm_UpdatesTerm(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 
 	res := node.HandleAppendEntries(raft.AppendEntriesArgs{Term: 5, LeaderID: "node-2"})
 	if !res.Success {
@@ -57,7 +57,7 @@ func TestRaftNode_HandleAppendEntries_HigherTerm_UpdatesTerm(t *testing.T) {
 }
 
 func TestRaftNode_HandleAppendEntries_LowerTerm_Rejected(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	node.HandleAppendEntries(raft.AppendEntriesArgs{Term: 10, LeaderID: "node-2"}) // advance term to 10
 
 	res := node.HandleAppendEntries(raft.AppendEntriesArgs{Term: 5, LeaderID: "node-3"}) // stale leader
@@ -70,7 +70,7 @@ func TestRaftNode_HandleAppendEntries_LowerTerm_Rejected(t *testing.T) {
 }
 
 func TestRaftNode_HandleRequestVote_GrantsOnce(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 
 	// First request: should grant.
 	_, granted1 := node.HandleRequestVote(1, "node-2", 0, 0)
@@ -86,7 +86,7 @@ func TestRaftNode_HandleRequestVote_GrantsOnce(t *testing.T) {
 }
 
 func TestRaftNode_HandleRequestVote_HigherTermResetsVote(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 
 	// Vote for node-2 in term 1.
 	node.HandleRequestVote(1, "node-2", 0, 0)
@@ -102,7 +102,7 @@ func TestRaftNode_HandleRequestVote_HigherTermResetsVote(t *testing.T) {
 }
 
 func TestRaftNode_SingleNode_BecomesLeader(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -134,7 +134,7 @@ func TestRaftNode_SingleNode_BecomesLeader(t *testing.T) {
 // committed entries that it never received.
 
 func TestRaftNode_HandleRequestVote_StaleLogTerm_Denied(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	// Simulate node-1 having log up to (index=3, term=4).
 	node.ForceLog(3, 4)
 
@@ -146,7 +146,7 @@ func TestRaftNode_HandleRequestVote_StaleLogTerm_Denied(t *testing.T) {
 }
 
 func TestRaftNode_HandleRequestVote_SameTermShorterLog_Denied(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	// node-1 has (index=5, term=4).
 	node.ForceLog(5, 4)
 
@@ -158,7 +158,7 @@ func TestRaftNode_HandleRequestVote_SameTermShorterLog_Denied(t *testing.T) {
 }
 
 func TestRaftNode_HandleRequestVote_SameTermEqualLog_Granted(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	node.ForceLog(5, 4)
 
 	_, granted := node.HandleRequestVote(5, "node-2", 5, 4)
@@ -168,7 +168,7 @@ func TestRaftNode_HandleRequestVote_SameTermEqualLog_Granted(t *testing.T) {
 }
 
 func TestRaftNode_HandleRequestVote_NewerLogTerm_Granted(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	node.ForceLog(10, 3)
 
 	// Candidate has shorter log but higher term — wins by §5.4.1 term rule.
@@ -179,7 +179,7 @@ func TestRaftNode_HandleRequestVote_NewerLogTerm_Granted(t *testing.T) {
 }
 
 func TestRaftNode_HandleAppendEntries_ResetsToFollower_WhenLeader(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 
 	node.ForceRole(raft.RoleLeader, 3)
 
@@ -274,7 +274,7 @@ func TestFileMetaStore_Load_CRCMismatch(t *testing.T) {
 
 func TestRaftNode_Meta_PersistsVoteOnGrant(t *testing.T) {
 	meta := raft.NewMemMetaStore()
-	node := raft.NewRaftNode("node-1", nil, meta)
+	node := raft.NewRaftNode("node-1", nil, meta, nil)
 
 	_, granted := node.HandleRequestVote(1, "node-2", 0, 0)
 	if !granted {
@@ -292,7 +292,7 @@ func TestRaftNode_Meta_PersistsVoteOnGrant(t *testing.T) {
 
 func TestRaftNode_Meta_PersistsTermOnAppendEntries(t *testing.T) {
 	meta := raft.NewMemMetaStore()
-	node := raft.NewRaftNode("node-1", nil, meta)
+	node := raft.NewRaftNode("node-1", nil, meta, nil)
 
 	node.HandleAppendEntries(raft.AppendEntriesArgs{Term: 7, LeaderID: "leader-1"})
 
@@ -309,7 +309,7 @@ func TestRaftNode_Meta_DeniesVoteOnSaveFailure(t *testing.T) {
 	meta := raft.NewMemMetaStore()
 	meta.InjectSaveError(errors.New("disk full"))
 
-	node := raft.NewRaftNode("node-1", nil, meta)
+	node := raft.NewRaftNode("node-1", nil, meta, nil)
 
 	_, granted := node.HandleRequestVote(1, "node-2", 0, 0)
 	if granted {
@@ -325,7 +325,7 @@ func TestRaftNode_Meta_RestoredOnRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileMetaStore: %v", err)
 	}
-	node1 := raft.NewRaftNode("node-1", nil, store1)
+	node1 := raft.NewRaftNode("node-1", nil, store1, nil)
 	node1.HandleRequestVote(3, "node-2", 0, 0)
 	store1.Close()
 
@@ -335,7 +335,7 @@ func TestRaftNode_Meta_RestoredOnRestart(t *testing.T) {
 		t.Fatalf("NewFileMetaStore (reopen): %v", err)
 	}
 	defer store2.Close()
-	node2 := raft.NewRaftNode("node-1", nil, store2)
+	node2 := raft.NewRaftNode("node-1", nil, store2, nil)
 
 	if got := node2.Term(); got != 3 {
 		t.Errorf("expected restored term=3, got %d", got)
@@ -371,7 +371,7 @@ func aeArgs(term int64, leaderID string, prevIdx, prevTerm int64, entries []*pb.
 // TestAppendEntries_Heartbeat_NoEntries verifies that an empty AppendEntries
 // (heartbeat) is accepted and resets the follower without touching the log.
 func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	node.ForceRole(raft.RoleCandidate, 2)
 
 	res := node.HandleAppendEntries(aeArgs(2, "leader", 0, 0, nil, 0))
@@ -389,7 +389,7 @@ func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
 // TestAppendEntries_AppendNewEntries verifies that new entries are appended
 // when prevLogIndex is consistent (base case: appending to empty log).
 func TestAppendEntries_AppendNewEntries(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 
 	entries := []*pb.LogEntry{
 		makeEntry(1, 1, "cmd-a"),
@@ -408,7 +408,7 @@ func TestAppendEntries_AppendNewEntries(t *testing.T) {
 // the follower lacks the entry at prevLogIndex, it returns the length of its
 // log as conflictIndex so the leader can jump forward (Fast Backup §5.3).
 func TestAppendEntries_PrevLogIndex_Miss_ReturnsConflictIndex(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	// Node has only entry at index 1, term 1.
 	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{makeEntry(1, 1, "a")}, 0))
 
@@ -430,7 +430,7 @@ func TestAppendEntries_PrevLogIndex_Miss_ReturnsConflictIndex(t *testing.T) {
 // when the entry at prevLogIndex exists but has the wrong term, the follower
 // returns the conflicting term and its first index (Fast Backup).
 func TestAppendEntries_PrevLogTerm_Mismatch_ReturnsConflictTerm(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	// Build log: [1:t1, 2:t1, 3:t1] — all in term 1.
 	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{
 		makeEntry(1, 1, "a"),
@@ -456,7 +456,7 @@ func TestAppendEntries_PrevLogTerm_Mismatch_ReturnsConflictTerm(t *testing.T) {
 // deleted and new entries replace them (§5.3: "delete the existing entry and
 // all that follow it").
 func TestAppendEntries_ConflictTruncation(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	// Start with log [1:t1, 2:t1, 3:t1].
 	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{
 		makeEntry(1, 1, "a"),
@@ -481,7 +481,7 @@ func TestAppendEntries_ConflictTruncation(t *testing.T) {
 // TestAppendEntries_IdempotentReplay verifies that replaying the same entries
 // does not duplicate them (§5.3 Log Matching: if index+term match, same command).
 func TestAppendEntries_IdempotentReplay(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	entries := []*pb.LogEntry{makeEntry(1, 1, "a"), makeEntry(2, 1, "b")}
 	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, entries, 0))
 	// Replay the same entries.
@@ -497,7 +497,7 @@ func TestAppendEntries_IdempotentReplay(t *testing.T) {
 // TestAppendEntries_CommitIndex_AdvancesOnLeaderCommit verifies that the
 // follower advances its commitIndex to min(leaderCommit, lastNewIndex).
 func TestAppendEntries_CommitIndex_AdvancesOnLeaderCommit(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	// Append 3 entries.
 	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{
 		makeEntry(1, 1, "a"),
@@ -518,7 +518,7 @@ func TestAppendEntries_CommitIndex_AdvancesOnLeaderCommit(t *testing.T) {
 // TestAppendEntries_CommitIndex_ClampedToLastNewIndex verifies that commitIndex
 // does not exceed the last new entry index even if leaderCommit is higher.
 func TestAppendEntries_CommitIndex_ClampedToLastNewIndex(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	// Append only 2 entries; leader claims commit at 5.
 	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{
 		makeEntry(1, 1, "a"),
@@ -532,7 +532,7 @@ func TestAppendEntries_CommitIndex_ClampedToLastNewIndex(t *testing.T) {
 // TestAppendEntries_StaleLeader_Rejected verifies that AppendEntries from a
 // stale leader (lower term) is rejected, per §5.1.
 func TestAppendEntries_StaleLeader_Rejected(t *testing.T) {
-	node := raft.NewRaftNode("node-1", nil, nil)
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
 	node.HandleAppendEntries(aeArgs(5, "leader-a", 0, 0, nil, 0)) // advance to term 5
 
 	res := node.HandleAppendEntries(aeArgs(3, "leader-old", 0, 0, nil, 0))

@@ -49,6 +49,11 @@ type RaftNode struct {
 	// state). nil disables persistence — used in tests and single-node mode.
 	meta MetaStore
 
+	// logStore persists LogEntry records across restarts (Raft §5 persistent
+	// state). nil disables persistence — used in tests and single-node mode.
+	// Phase 5c: wire to WALLogStore in production.
+	logStore LogStore
+
 	// resetCh is sent to from Handle* methods to reset the election timer.
 	// Buffer of 1: sender never blocks.
 	resetCh chan struct{}
@@ -57,13 +62,16 @@ type RaftNode struct {
 // NewRaftNode creates a RaftNode. peers may be nil for single-node or test use.
 // meta may be nil to disable persistence (tests, single-node mode). When non-nil,
 // the node restores currentTerm and votedFor from the store before Run() is called.
-func NewRaftNode(id string, peers *PeerClients, meta MetaStore) *RaftNode {
+// logStore may be nil to disable log persistence. When non-nil, the node
+// restores log entries from the store before Run() is called.
+func NewRaftNode(id string, peers *PeerClients, meta MetaStore, logStore LogStore) *RaftNode {
 	n := &RaftNode{
-		id:      id,
-		peers:   peers,
-		role:    RoleFollower,
-		meta:    meta,
-		resetCh: make(chan struct{}, 1),
+		id:       id,
+		peers:    peers,
+		role:     RoleFollower,
+		meta:     meta,
+		logStore: logStore,
+		resetCh:  make(chan struct{}, 1),
 	}
 	if meta != nil {
 		if m, err := meta.Load(); err != nil {
@@ -71,6 +79,15 @@ func NewRaftNode(id string, peers *PeerClients, meta MetaStore) *RaftNode {
 		} else {
 			n.currentTerm = m.Term
 			n.votedFor = m.VotedFor
+		}
+	}
+	if logStore != nil {
+		entries, err := logStore.LoadAll()
+		if err != nil {
+			slog.Error("raft: failed to load persistent log, starting from empty log", "err", err)
+		} else {
+			n.log = entries
+			slog.Info("raft: log restored from store", "entries", len(entries))
 		}
 	}
 	return n
@@ -238,7 +255,15 @@ func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesResu
 				continue
 			}
 			if ok && existing.Term != pbEntry.Term {
-				// Conflict: truncate from this index onward.
+				// Conflict: persist truncation marker before modifying in-memory log.
+				// If persist fails, return failure without touching in-memory state;
+				// the leader will retry and eventually converge.
+				if n.logStore != nil {
+					if err := n.logStore.TruncateSuffix(pbEntry.Index); err != nil {
+						slog.Error("raft: failed to persist log truncation, rejecting AppendEntries", "err", err)
+						return AppendEntriesResult{Term: n.currentTerm, Success: false}
+					}
+				}
 				cutAt := 0
 				for cutAt < len(n.log) && n.log[cutAt].Index < pbEntry.Index {
 					cutAt++
@@ -248,6 +273,15 @@ func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesResu
 				// Fall through to append below.
 			}
 			// ok=false: entry not present → append below.
+		}
+		// Persist the new entry before updating in-memory log.
+		// If persist fails, the entry is in neither the WAL nor memory — consistent.
+		// Return failure so the leader retries; it will re-send this entry.
+		if n.logStore != nil {
+			if err := n.logStore.Append(LogEntry{Index: pbEntry.Index, Term: pbEntry.Term, Data: pbEntry.Data}); err != nil {
+				slog.Error("raft: failed to persist log entry, rejecting AppendEntries", "err", err)
+				return AppendEntriesResult{Term: n.currentTerm, Success: false}
+			}
 		}
 		n.log = append(n.log, LogEntry{
 			Index: pbEntry.Index,
