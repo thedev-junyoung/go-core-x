@@ -70,6 +70,9 @@ func main() {
 	nodeID := envOr("CORE_X_NODE_ID", "")
 	grpcAddr := envOr("CORE_X_GRPC_ADDR", "")
 	peers := envOr("CORE_X_PEERS", "")           // "node-2:localhost:9002,node-3:localhost:9003"
+	// Phase 7: nodeID → HTTP base URL map for leader redirect.
+	// Format: "n1=http://host1:8080,n2=http://host2:8081,n3=http://host3:8082"
+	raftHTTPNodes := envOr("CORE_X_RAFT_HTTP_NODES", "") // optional
 	vnodeCount := envInt("CORE_X_VNODE_COUNT", 150)
 	forwardTimeoutStr := envOr("CORE_X_FORWARD_TIMEOUT", "3s")
 	forwardTimeout, err := time.ParseDuration(forwardTimeoutStr)
@@ -460,9 +463,10 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Phase 6: Raft KV endpoints — only registered when Raft is active.
+	// Phase 6/7: Raft KV endpoints — only registered when Raft is active.
 	if raftNode != nil && raftKVSM != nil {
-		mux.Handle("POST /raft/kv", infrahttp.NewProposeHandler(raftNode, raftKVSM))
+		raftAddrMap := parseRaftHTTPNodes(raftHTTPNodes)
+		mux.Handle("POST /raft/kv", infrahttp.NewProposeHandler(raftNode, raftKVSM, raftAddrMap))
 		mux.Handle("GET /raft/kv/{key}", infrahttp.NewRaftKVGetHandler(raftKVSM))
 	}
 
@@ -592,6 +596,30 @@ func splitPeers(s string) []peerEntry {
 		})
 	}
 	return result
+}
+
+// parseRaftHTTPNodes parses CORE_X_RAFT_HTTP_NODES into a nodeID→httpBaseURL map.
+// Format: "n1=http://host1:8080,n2=http://host2:8081"
+func parseRaftHTTPNodes(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	m := make(map[string]string)
+	for _, entry := range strings.Split(s, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		idx := strings.Index(entry, "=")
+		if idx < 0 {
+			continue
+		}
+		m[entry[:idx]] = entry[idx+1:]
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
 }
 
 // envInt는 지정된 환경 변수의 정수 값을 반환한다.

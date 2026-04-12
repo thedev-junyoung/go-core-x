@@ -394,6 +394,16 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 - [x] 리더가 아닐 때 503 반환 (클라이언트 재시도/redirect 처리)
 - [x] ADR-014: KV 상태 머신 + HTTP 연동 설계 근거
 
+### Phase 7: 멀티 노드 통합 테스트 + 리더 Redirect ✅ COMPLETE (2026-04-12)
+- [x] `RaftNode.LeaderID()` — 현재 알려진 리더 ID 반환 (팔로워가 heartbeat에서 학습)
+- [x] `ProposeHandler` — 팔로워 요청 시 307 Temporary Redirect → 리더 HTTP 주소
+- [x] `CORE_X_RAFT_HTTP_NODES` 환경 변수 — nodeID→HTTP base URL 매핑
+- [x] `cluster_test.go` — 실제 loopback gRPC 3-노드 클러스터 통합 테스트
+  - `TestCluster_ElectsLeader` — 5초 내 단일 리더 선출 검증
+  - `TestCluster_ProposeAndReplicate` — 리더 Propose → 전체 노드 상태 머신 반영
+  - `TestCluster_LeaderIDKnownToFollowers` — heartbeat 후 팔로워의 LeaderID() 검증
+- [x] ADR-015: 리더 Redirect + 멀티 노드 통합 테스트 설계 근거
+
 ---
 
 ## Architecture Decision Records (ADR)
@@ -432,12 +442,15 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 ### Phase 6 (Complete)
 - [ADR-014: Raft KV State Machine — HTTP Propose + Apply-Wait](docs/adr/014-raft-kv-state-machine.md)
 
+### Phase 7 (Complete)
+- [ADR-015: Raft Leader Redirect + 멀티 노드 통합 테스트](docs/adr/015-raft-leader-redirect-and-multinode-test.md)
+
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 
 ---
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Current Status**: Phase 6 Complete (2026-04-12)
-- **Completed**: Phase 5a/5b/5c/5d/6 — Leader Election, Log Replication, Log Persistence, Write Path, KV State Machine HTTP
-- **Next**: Phase 7 — Raft 멀티 노드 통합 테스트 + 리더 redirect
+- **Current Status**: Phase 7 Complete (2026-04-12)
+- **Completed**: Phase 5a/5b/5c/5d/6/7 — Leader Election, Log Replication, Log Persistence, Write Path, KV State Machine HTTP, Leader Redirect + Multi-node Tests
+- **Next**: Phase 8 — Raft 스냅샷(log compaction) / 멤버십 변경
