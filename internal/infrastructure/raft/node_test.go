@@ -543,3 +543,167 @@ func TestAppendEntries_StaleLeader_Rejected(t *testing.T) {
 		t.Errorf("expected response term=5, got %d", res.Term)
 	}
 }
+
+// --- Phase 5d: Propose + Apply tests ----------------------------------------
+
+// TestPropose_NotLeader verifies that Propose returns isLeader=false when the
+// node is not the current leader (Follower and Candidate states).
+func TestPropose_NotLeader(t *testing.T) {
+	for _, role := range []raft.RaftRole{raft.RoleFollower, raft.RoleCandidate} {
+		node := raft.NewRaftNode("node-1", nil, nil, nil)
+		node.ForceRole(role, 1)
+
+		_, _, isLeader := node.Propose([]byte("data"))
+		if isLeader {
+			t.Errorf("role=%v: expected isLeader=false, got true", role)
+		}
+		if node.LogLen() != 0 {
+			t.Errorf("role=%v: log must stay empty on non-leader Propose", role)
+		}
+	}
+}
+
+// TestPropose_Leader appends to log and returns the assigned index and term.
+func TestPropose_Leader(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
+	node.ForceRole(raft.RoleLeader, 3)
+
+	idx, term, isLeader := node.Propose([]byte("hello"))
+	if !isLeader {
+		t.Fatal("expected isLeader=true")
+	}
+	if idx != 1 {
+		t.Errorf("index: want 1, got %d", idx)
+	}
+	if term != 3 {
+		t.Errorf("term: want 3, got %d", term)
+	}
+	if node.LogLen() != 1 {
+		t.Errorf("log len: want 1, got %d", node.LogLen())
+	}
+}
+
+// TestPropose_MultipleEntries verifies sequential index assignment.
+func TestPropose_MultipleEntries(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
+	node.ForceRole(raft.RoleLeader, 1)
+
+	for i := int64(1); i <= 5; i++ {
+		idx, _, isLeader := node.Propose([]byte("cmd"))
+		if !isLeader {
+			t.Fatalf("entry %d: isLeader=false", i)
+		}
+		if idx != i {
+			t.Errorf("entry %d: want index=%d, got %d", i, i, idx)
+		}
+	}
+	if node.LogLen() != 5 {
+		t.Errorf("log len: want 5, got %d", node.LogLen())
+	}
+}
+
+// TestPropose_PersistsToLogStore verifies that Propose writes the entry to
+// the injected LogStore before returning.
+func TestPropose_PersistsToLogStore(t *testing.T) {
+	store := raft.NewMemLogStore()
+	node := raft.NewRaftNode("node-1", nil, nil, store)
+	node.ForceRole(raft.RoleLeader, 2)
+
+	node.Propose([]byte("persistent"))
+
+	entries, err := store.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 persisted entry, got %d", len(entries))
+	}
+	if string(entries[0].Data) != "persistent" {
+		t.Errorf("data: want %q, got %q", "persistent", entries[0].Data)
+	}
+}
+
+// TestApplyLoop_DeliversCommittedEntries verifies that runApplyLoop
+// delivers committed entries to applyCh when commitIndex advances.
+// The test manually advances commitIndex by sending AppendEntries with
+// leaderCommit set, bypassing the Propose/heartbeat path.
+func TestApplyLoop_DeliversCommittedEntries(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
+	go node.Run(ctx)
+
+	// Force follower state so HandleAppendEntries accepts entries.
+	node.ForceRole(raft.RoleFollower, 1)
+
+	// Send two entries from a leader, committed immediately (leaderCommit=2).
+	node.HandleAppendEntries(raft.AppendEntriesArgs{
+		Term:         1,
+		LeaderID:     "leader",
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries: []*pb.LogEntry{
+			{Index: 1, Term: 1, Data: []byte("a")},
+			{Index: 2, Term: 1, Data: []byte("b")},
+		},
+		LeaderCommit: 2,
+	})
+
+	// Expect both entries on applyCh in order.
+	for _, want := range []string{"a", "b"} {
+		select {
+		case e := <-node.ApplyCh():
+			if string(e.Data) != want {
+				t.Errorf("want %q, got %q", want, string(e.Data))
+			}
+		case <-ctx.Done():
+			t.Fatalf("timeout waiting for entry %q on applyCh", want)
+		}
+	}
+}
+
+// TestSingleNode_ProposeAndApply is an end-to-end test for the single-node
+// write path: the node wins election, Propose is called, and the entry is
+// committed and delivered to applyCh within a reasonable timeout.
+func TestSingleNode_ProposeAndApply(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	node := raft.NewRaftNode("node-1", nil, nil, nil)
+	go node.Run(ctx)
+
+	// Wait for the node to become leader (single-node: fast path).
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if node.Role() == raft.RoleLeader {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if node.Role() != raft.RoleLeader {
+		t.Fatal("node did not become leader within 1s")
+	}
+
+	// Propose an entry.
+	idx, _, isLeader := node.Propose([]byte("hello-raft"))
+	if !isLeader {
+		t.Fatal("Propose returned isLeader=false after becoming leader")
+	}
+	if idx != 1 {
+		t.Errorf("expected index=1, got %d", idx)
+	}
+
+	// Wait for the entry to appear on applyCh (commit happens within next heartbeat tick).
+	select {
+	case e := <-node.ApplyCh():
+		if string(e.Data) != "hello-raft" {
+			t.Errorf("applied data: want %q, got %q", "hello-raft", string(e.Data))
+		}
+		if e.Index != 1 {
+			t.Errorf("applied index: want 1, got %d", e.Index)
+		}
+	case <-ctx.Done():
+		t.Fatal("timeout: entry not applied within 2s")
+	}
+}

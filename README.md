@@ -379,11 +379,12 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 - [x] `cmd/main.go` `WALLogStore` 주입 (`data/raft_log.wal`)
 - [x] ADR-012: Raft 로그 WAL 영속화 설계 근거
 
-### Phase 5d: Leader Write Path (Next)
-- [ ] `Propose(data []byte)` — 클라이언트 요청을 Raft 로그에 append
-- [ ] Leader가 자신의 로그에 persist-before-send
-- [ ] Apply channel — `commitIndex` 진전 시 상태 머신에 반영
-- [ ] ADR-013: Raft write path 설계
+### Phase 5d: Leader Write Path ✅ COMPLETE (2026-04-12)
+- [x] `Propose(data []byte) (index, term int64, isLeader bool)` — leader log append + persist
+- [x] `ApplyCh() <-chan LogEntry` — 커밋된 엔트리 전달 채널
+- [x] `runApplyLoop` — 5ms 폴링, `commitIndex > lastApplied` 시 `applyCh`로 전달
+- [x] 단일 노드 fast-path — heartbeat tick마다 즉시 `maybeAdvanceCommitIndex`
+- [x] ADR-013: Propose + Apply channel 설계 근거
 
 ---
 
@@ -417,12 +418,15 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 ### Phase 5c (Complete)
 - [ADR-012: Raft 로그 WAL 영속화](docs/adr/012-raft-log-wal-persistence.md)
 
+### Phase 5d (Complete)
+- [ADR-013: Raft Write Path — Propose + Apply Channel](docs/adr/013-raft-write-path.md)
+
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 
 ---
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Current Status**: Phase 5c Complete (2026-04-12)
-- **Completed**: Phase 5a/5b/5c — Raft Leader Election, Log Replication, Log Persistence
-- **Next**: Phase 5d — Leader Write Path (`Propose` + Apply channel)
+- **Current Status**: Phase 5d Complete (2026-04-12)
+- **Completed**: Phase 5a/5b/5c/5d — Leader Election, Log Replication, Log Persistence, Write Path
+- **Next**: Phase 6 — HTTP `/propose` endpoint → Raft → KV 상태 머신 연동

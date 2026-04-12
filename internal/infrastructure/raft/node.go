@@ -34,11 +34,11 @@ type RaftNode struct {
 	votedFor    string   // nodeID that received our vote this term; "" = none
 	role        RaftRole
 
-	// Raft §5.3 Log state (in-memory; Phase 5c will wire to WAL).
+	// Raft §5.3 Log state.
 	// log is 0-indexed; log[i].Index == i+1 (1-based Raft indices).
 	log         []LogEntry
 	commitIndex int64 // highest log index known to be committed
-	lastApplied int64 // highest log index applied to state machine (unused in Phase 5b)
+	lastApplied int64 // highest log index applied to state machine
 
 	// Leader-only volatile state (§5.3). Keyed by peer address.
 	// Initialised to lastLogIndex+1 on election; reset on each term.
@@ -53,6 +53,11 @@ type RaftNode struct {
 	// state). nil disables persistence — used in tests and single-node mode.
 	// Phase 5c: wire to WALLogStore in production.
 	logStore LogStore
+
+	// applyCh delivers committed log entries to the state machine consumer.
+	// runApplyLoop sends here when commitIndex advances past lastApplied.
+	// Buffer of 256: allows burst delivery without blocking the apply loop.
+	applyCh chan LogEntry
 
 	// resetCh is sent to from Handle* methods to reset the election timer.
 	// Buffer of 1: sender never blocks.
@@ -71,6 +76,7 @@ func NewRaftNode(id string, peers *PeerClients, meta MetaStore, logStore LogStor
 		role:     RoleFollower,
 		meta:     meta,
 		logStore: logStore,
+		applyCh:  make(chan LogEntry, 256),
 		resetCh:  make(chan struct{}, 1),
 	}
 	if meta != nil {
@@ -374,9 +380,52 @@ func (n *RaftNode) candidateLogUpToDate(candidateLastLogIndex, candidateLastLogT
 	return candidateLastLogIndex >= ourIdx
 }
 
+// ApplyCh returns the channel on which committed log entries are delivered in
+// index order. Consumers must read promptly; a slow consumer stalls the apply
+// loop once the 256-entry buffer is full.
+func (n *RaftNode) ApplyCh() <-chan LogEntry {
+	return n.applyCh
+}
+
+// Propose appends data to the leader's log and returns the assigned index and
+// term. Returns isLeader=false when this node is not the current leader;
+// callers should redirect the request to the actual leader.
+//
+// The entry is persisted (fsync'd) to logStore before this method returns.
+// Commit happens asynchronously: read ApplyCh() to know when the entry is
+// committed and applied.
+func (n *RaftNode) Propose(data []byte) (index int64, term int64, isLeader bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.role != RoleLeader {
+		return 0, 0, false
+	}
+
+	lastIdx, _ := n.lastEntry()
+	newIndex := lastIdx + 1
+	entry := LogEntry{Index: newIndex, Term: n.currentTerm, Data: data}
+
+	// Persist before in-memory append: same invariant as HandleAppendEntries.
+	// If persist fails, treat as non-leader so the caller retries or redirects.
+	if n.logStore != nil {
+		if err := n.logStore.Append(entry); err != nil {
+			slog.Error("raft: leader failed to persist proposed entry", "index", newIndex, "err", err)
+			return 0, 0, false
+		}
+	}
+
+	n.log = append(n.log, entry)
+	slog.Info("raft: entry proposed", "id", n.id, "index", newIndex, "term", n.currentTerm)
+
+	return newIndex, n.currentTerm, true
+}
+
 // Run starts the Raft state machine. Blocks until ctx is cancelled.
 // Call this in a dedicated goroutine.
 func (n *RaftNode) Run(ctx context.Context) {
+	go n.runApplyLoop(ctx)
+
 	for {
 		n.mu.Lock()
 		role := n.role
@@ -393,6 +442,48 @@ func (n *RaftNode) Run(ctx context.Context) {
 
 		if ctx.Err() != nil {
 			return
+		}
+	}
+}
+
+// runApplyLoop delivers committed entries to applyCh.
+//
+// Polls at applyPollInterval; when commitIndex > lastApplied it collects
+// entries [lastApplied+1, commitIndex] and sends them to applyCh in order.
+// Runs until ctx is cancelled.
+func (n *RaftNode) runApplyLoop(ctx context.Context) {
+	ticker := time.NewTicker(applyPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.mu.Lock()
+			if n.commitIndex <= n.lastApplied {
+				n.mu.Unlock()
+				continue
+			}
+			// Snapshot the range to apply while holding the lock.
+			from := n.lastApplied + 1
+			to := n.commitIndex
+			toApply := make([]LogEntry, 0, int(to-from+1))
+			for i := from; i <= to; i++ {
+				if e, ok := n.entryAt(i); ok {
+					toApply = append(toApply, e)
+				}
+			}
+			n.lastApplied = to
+			n.mu.Unlock()
+
+			for _, e := range toApply {
+				select {
+				case n.applyCh <- e:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
 	}
 }
@@ -593,6 +684,19 @@ func (n *RaftNode) runLeader(ctx context.Context) {
 			n.mu.Unlock()
 
 			n.sendHeartbeats(ctx, peers, currentTerm)
+
+			// Single-node fast-path: no peers to replicate to, so sendHeartbeats
+			// returns immediately without calling maybeAdvanceCommitIndex.
+			// Advance commitIndex here so Propose'd entries get committed and
+			// delivered to applyCh without waiting for a quorum that will never form.
+			if len(peers) == 0 {
+				n.mu.Lock()
+				if n.role == RoleLeader && n.currentTerm == term {
+					lastIdx, _ := n.lastEntry()
+					n.maybeAdvanceCommitIndex(term, lastIdx, 1)
+				}
+				n.mu.Unlock()
+			}
 		}
 	}
 }

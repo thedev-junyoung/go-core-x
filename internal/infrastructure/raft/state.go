@@ -1,5 +1,5 @@
-// Package raft implements Phase 5a Raft leader election.
-// Phase 5b will extend this with log replication.
+// Package raft implements the Raft consensus algorithm (leader election,
+// log replication, and write path).
 package raft
 
 import "time"
@@ -34,8 +34,12 @@ func (r RaftRole) String() string {
 // Raft timing constants.
 // ElectionTimeoutMin / Max: Raft paper recommends 150–300ms.
 // HeartbeatInterval must be << ElectionTimeoutMin to prevent spurious elections.
+// applyPollInterval: how often runApplyLoop checks commitIndex > lastApplied.
+// Kept well below HeartbeatInterval so apply latency is dominated by commit
+// latency, not polling lag.
 const (
 	ElectionTimeoutMin = 150 * time.Millisecond
 	ElectionTimeoutMax = 300 * time.Millisecond
 	HeartbeatInterval  = 50 * time.Millisecond
+	applyPollInterval  = 5 * time.Millisecond
 )
