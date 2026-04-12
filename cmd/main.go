@@ -42,9 +42,6 @@ import (
 	"syscall"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
 	appingestion "github.com/junyoung/core-x/internal/application/ingestion"
 	"github.com/junyoung/core-x/internal/domain"
 	"github.com/junyoung/core-x/internal/infrastructure/cluster"
@@ -80,12 +77,9 @@ func main() {
 		forwardTimeout = 3 * time.Second
 	}
 
-	// Phase 3b: Replication 설정.
-	role, err := cluster.RoleFromEnv()
-	if err != nil {
-		slog.Error("invalid CORE_X_ROLE", "err", err)
-		os.Exit(1)
-	}
+	// Phase 3b / 5b: Replication 설정.
+	// CORE_X_PRIMARY_ADDR / CORE_X_REPLICA_WAL_PATH は引き続き Replica Client に使われる.
+	// 静的な CORE_X_ROLE 分岐は RoleController に置き換えられた (ADR-011).
 	primaryAddr := envOr("CORE_X_PRIMARY_ADDR", "")
 	replicaWALPath := envOr("CORE_X_REPLICA_WAL_PATH", "./data/replica.wal")
 
@@ -285,17 +279,16 @@ func main() {
 		)
 	}
 
-	// --- Phase 3b: Replication 초기화 ------------------------------------------
-	var replLag *infrareplication.ReplicationLag
+	// --- Phase 5b: Replication 초기화 (동적 역할 전환) ---------------------------
+	// ManagedReplicationServer는 항상 gRPC에 등록한다.
+	// 실제 WAL 스트리밍 활성화/비활성화는 RoleController → ReplicationManager가 담당한다.
+	// 비활성 상태의 StreamWAL 호출은 codes.Unavailable을 반환한다 (null-object 패턴).
+	replLag := infrareplication.NewReplicationLag()
 
-	if role == cluster.RolePrimary {
-		if grpcSrv == nil {
-			slog.Error("replication: primary role requires CORE_X_NODE_ID and CORE_X_GRPC_ADDR to be set")
-			os.Exit(1)
-		}
+	var replManager *infrareplication.ReplicationManager
 
-		replLag = infrareplication.NewReplicationLag()
-
+	if grpcSrv != nil {
+		// Open WAL for streaming. This file handle is held for the lifetime of the process.
 		walReadFile, err := os.Open(walPath)
 		if err != nil {
 			slog.Error("replication: failed to open wal for streaming", "path", walPath, "err", err)
@@ -303,48 +296,51 @@ func main() {
 		}
 		defer walReadFile.Close()
 
-		streamer := infrareplication.NewStreamer(walReadFile, walWriter.CompactionNotify, replLag, 10*time.Millisecond)
-		replServer := infrareplication.NewReplicationServer(streamer)
-		grpcSrv.RegisterReplicationService(replServer)
+		managedReplSrv := infrareplication.NewManagedReplicationServer()
+		grpcSrv.RegisterReplicationService(managedReplSrv)
 
-		slog.Info("replication: primary mode enabled", "wal_path", walPath)
-
-	} else if role == cluster.RoleReplica {
-		replLag = infrareplication.NewReplicationLag()
-
-		replicaDir := filepath.Dir(replicaWALPath)
-		if err := os.MkdirAll(replicaDir, 0750); err != nil {
-			slog.Error("replication: failed to create replica wal dir", "err", err)
-			os.Exit(1)
+		streamerFactory := func() *infrareplication.Streamer {
+			return infrareplication.NewStreamer(walReadFile, walWriter.CompactionNotify, replLag, 10*time.Millisecond)
 		}
+		replManager = infrareplication.NewReplicationManager(streamerFactory, managedReplSrv)
 
-		receiver, err := infrareplication.NewReceiver(replicaWALPath)
-		if err != nil {
-			slog.Error("replication: failed to open replica wal", "path", replicaWALPath, "err", err)
-			os.Exit(1)
-		}
-
-		replClient := infrareplication.NewReplicationClient(
-			primaryAddr,
-			nodeID,
-			receiver,
-			replLag,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		)
-
-		replCtx, replCancel := context.WithCancel(context.Background())
-		defer replCancel()
-
-		go func() {
-			if err := replClient.Run(replCtx); err != nil && replCtx.Err() == nil {
-				slog.Error("replication client stopped unexpectedly", "err", err)
+		// Replica client: connects to the current primary when this node is not leader.
+		// In Raft-driven mode the primary is the Raft leader; primaryAddr is still
+		// required for the replica client to know where to connect.
+		if primaryAddr != "" {
+			replicaDir := filepath.Dir(replicaWALPath)
+			if err := os.MkdirAll(replicaDir, 0750); err != nil {
+				slog.Error("replication: failed to create replica wal dir", "err", err)
+				os.Exit(1)
 			}
-		}()
 
-		slog.Info("replication: replica mode enabled",
-			"primary_addr", primaryAddr,
-			"replica_wal_path", replicaWALPath,
-		)
+			receiver, err := infrareplication.NewReceiver(replicaWALPath)
+			if err != nil {
+				slog.Error("replication: failed to open replica wal", "path", replicaWALPath, "err", err)
+				os.Exit(1)
+			}
+			_ = receiver // Receiver is wired to ReplicationClient below.
+
+			replClient := infrareplication.NewReplicationClient(
+				primaryAddr,
+				nodeID,
+				receiver,
+				replLag,
+			)
+
+			replCtx, replCancel := context.WithCancel(context.Background())
+			defer replCancel()
+
+			go func() {
+				if err := replClient.Run(replCtx); err != nil && replCtx.Err() == nil {
+					slog.Error("replication client stopped unexpectedly", "err", err)
+				}
+			}()
+
+			slog.Info("replication: replica client started", "primary_addr", primaryAddr)
+		}
+
+		slog.Info("replication: managed server registered — role driven by RoleController")
 	}
 
 	// --- Phase 5a: Raft Leader Election ------------------------------------
@@ -373,7 +369,17 @@ func main() {
 			defer peerClients.Close()
 		}
 
-		raftNode = infraraft.NewRaftNode(nodeID, peerClients, nil) // TODO(phase5b): inject FileMetaStore
+		// Phase 5b: FileMetaStore — Raft persistent state (currentTerm, votedFor).
+		// Stored in data/raft_meta.bin (same directory as WAL).
+		metaPath := filepath.Join(filepath.Dir(walPath), "raft_meta.bin")
+		metaStore, metaErr := infraraft.NewFileMetaStore(metaPath)
+		if metaErr != nil {
+			slog.Error("raft: failed to open meta store", "path", metaPath, "err", metaErr)
+			os.Exit(1)
+		}
+		defer metaStore.Close()
+
+		raftNode = infraraft.NewRaftNode(nodeID, peerClients, metaStore)
 		raftServer := infraraft.NewRaftServer(raftNode)
 		grpcSrv.RegisterRaftService(raftServer)
 
@@ -382,7 +388,20 @@ func main() {
 
 		go raftNode.Run(raftCtx)
 
-		slog.Info("raft: started", "node_id", nodeID, "peers", peerAddrs)
+		slog.Info("raft: started",
+			"node_id", nodeID,
+			"peers", peerAddrs,
+			"meta_path", metaPath,
+		)
+
+		// Phase 5b: RoleController — 50ms polling, drives ReplicationManager.
+		if replManager != nil {
+			rc := cluster.NewRoleController(raftNode, replManager, 50*time.Millisecond)
+			rcCtx, rcCancel := context.WithCancel(context.Background())
+			defer rcCancel()
+			go rc.Run(rcCtx)
+			slog.Info("role_controller: started", "poll_interval", "50ms")
+		}
 	}
 
 	inframetrics.RegisterReplicationMetrics(promReg, replLag)

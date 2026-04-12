@@ -6,7 +6,18 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	pb "github.com/junyoung/core-x/proto/pb"
 )
+
+// LogEntry is the in-memory representation of a Raft log record.
+// The on-wire format is pb.LogEntry; this avoids a proto heap allocation
+// on the hot read path inside HandleAppendEntries.
+type LogEntry struct {
+	Index int64
+	Term  int64
+	Data  []byte
+}
 
 // RaftNode implements the Raft consensus state machine.
 // It manages transitions between Follower, Candidate, and Leader roles.
@@ -23,11 +34,16 @@ type RaftNode struct {
 	votedFor    string   // nodeID that received our vote this term; "" = none
 	role        RaftRole
 
-	// lastLogIndex and lastLogTerm track the last entry in this node's log.
-	// Used for §5.4.1 election restriction. Both are 0 until Phase 5b adds
-	// actual log entries via HandleAppendEntries.
-	lastLogIndex int64
-	lastLogTerm  int64
+	// Raft §5.3 Log state (in-memory; Phase 5c will wire to WAL).
+	// log is 0-indexed; log[i].Index == i+1 (1-based Raft indices).
+	log         []LogEntry
+	commitIndex int64 // highest log index known to be committed
+	lastApplied int64 // highest log index applied to state machine (unused in Phase 5b)
+
+	// Leader-only volatile state (§5.3). Keyed by peer address.
+	// Initialised to lastLogIndex+1 on election; reset on each term.
+	nextIndex  map[string]int64 // next log index to send to each peer
+	matchIndex map[string]int64 // highest index known to be replicated on each peer
 
 	// meta persists currentTerm and votedFor across restarts (Raft §5 persistent
 	// state). nil disables persistence — used in tests and single-node mode.
@@ -87,32 +103,89 @@ func (n *RaftNode) ForceRole(role RaftRole, term int64) {
 	n.currentTerm = term
 }
 
-// ForceLog sets lastLogIndex and lastLogTerm directly. Used only in tests
-// to simulate a node that has already applied log entries.
+// ForceLog appends a synthetic log entry with the given index and term.
+// Used only in tests to simulate a node that has already received log entries.
 func (n *RaftNode) ForceLog(lastLogIndex, lastLogTerm int64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.lastLogIndex = lastLogIndex
-	n.lastLogTerm = lastLogTerm
+	// Replace the log with a single sentinel entry that has the requested
+	// index/term. This is sufficient for election-restriction tests (§5.4.1)
+	// without constructing a full sequence.
+	n.log = []LogEntry{{Index: lastLogIndex, Term: lastLogTerm}}
 }
 
-// HandleAppendEntries processes an incoming AppendEntries (heartbeat) RPC.
+// lastEntry returns the index and term of the last log entry.
+// Must be called with mu held.
+func (n *RaftNode) lastEntry() (index, term int64) {
+	if len(n.log) == 0 {
+		return 0, 0
+	}
+	e := n.log[len(n.log)-1]
+	return e.Index, e.Term
+}
+
+// entryAt returns the LogEntry at 1-based Raft index i, and whether it exists.
+// Must be called with mu held.
+func (n *RaftNode) entryAt(index int64) (LogEntry, bool) {
+	if index <= 0 || int(index) > len(n.log) {
+		return LogEntry{}, false
+	}
+	// log[i].Index may not equal i+1 if ForceLog was used to set a sentinel,
+	// so we search from the end (fast for common case: recent index).
+	for i := len(n.log) - 1; i >= 0; i-- {
+		if n.log[i].Index == index {
+			return n.log[i], true
+		}
+	}
+	return LogEntry{}, false
+}
+
+// CommitIndex returns the current commitIndex. Safe to call from any goroutine.
+func (n *RaftNode) CommitIndex() int64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.commitIndex
+}
+
+// LogLen returns the number of entries in the in-memory log. Used by tests.
+func (n *RaftNode) LogLen() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.log)
+}
+
+// HandleAppendEntries processes an incoming AppendEntries RPC (§5.3).
 // Implements RaftHandler.
-func (n *RaftNode) HandleAppendEntries(term int64, leaderID string) (currentTerm int64, success bool) {
+//
+// §5.3 Log Matching guarantees:
+//   - If two entries in different logs have the same index and term,
+//     they store the same command (ensured by leader never overwriting).
+//   - If two entries in different logs have the same index and term,
+//     all preceding entries are identical (enforced by prevLogIndex check here).
+func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesResult {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if term < n.currentTerm {
-		// Stale leader — reject.
-		return n.currentTerm, false
+	reject := func(conflictIndex, conflictTerm int64) AppendEntriesResult {
+		return AppendEntriesResult{
+			Term:          n.currentTerm,
+			Success:       false,
+			ConflictIndex: conflictIndex,
+			ConflictTerm:  conflictTerm,
+		}
 	}
 
-	// Valid heartbeat: update term, revert to Follower.
-	if term > n.currentTerm {
-		n.currentTerm = term
+	if args.Term < n.currentTerm {
+		// Stale leader — reject. Fast Backup fields not meaningful here.
+		return reject(0, 0)
+	}
+
+	// Valid RPC: update term and revert to Follower if necessary.
+	if args.Term > n.currentTerm {
+		n.currentTerm = args.Term
 		n.votedFor = ""
 		if n.meta != nil {
-			if err := n.meta.Save(RaftMeta{Term: term, VotedFor: ""}); err != nil {
+			if err := n.meta.Save(RaftMeta{Term: args.Term, VotedFor: ""}); err != nil {
 				slog.Warn("raft: failed to persist term update from AppendEntries", "err", err)
 			}
 		}
@@ -125,7 +198,75 @@ func (n *RaftNode) HandleAppendEntries(term int64, leaderID string) (currentTerm
 	default:
 	}
 
-	return n.currentTerm, true
+	// §5.3 Consistency check: prevLogIndex/prevLogTerm must match.
+	if args.PrevLogIndex > 0 {
+		prev, ok := n.entryAt(args.PrevLogIndex)
+		if !ok {
+			// We don't have an entry at prevLogIndex.
+			// Fast Backup: tell the leader the length of our log so it can
+			// jump directly to the next valid index.
+			lastIdx, _ := n.lastEntry()
+			return reject(lastIdx+1, 0)
+		}
+		if prev.Term != args.PrevLogTerm {
+			// Term mismatch: find the first index of prev.Term so the leader
+			// can skip the entire conflicting term in one round-trip.
+			conflictTerm := prev.Term
+			conflictIdx := prev.Index
+			for conflictIdx > 1 {
+				e, ok := n.entryAt(conflictIdx - 1)
+				if !ok || e.Term != conflictTerm {
+					break
+				}
+				conflictIdx--
+			}
+			return reject(conflictIdx, conflictTerm)
+		}
+	}
+
+	// §5.3: Append new entries, truncating conflicting ones first.
+	// Once a conflict is found we truncate and switch to append-only mode;
+	// re-checking entryAt after truncation is correct but O(n²).  Since we
+	// process entries in ascending index order the truncation point never moves
+	// backward, so a single pass is sufficient.
+	truncated := false
+	for _, pbEntry := range args.Entries {
+		if !truncated {
+			existing, ok := n.entryAt(pbEntry.Index)
+			if ok && existing.Term == pbEntry.Term {
+				// Matching entry already present: skip (idempotent).
+				continue
+			}
+			if ok && existing.Term != pbEntry.Term {
+				// Conflict: truncate from this index onward.
+				cutAt := 0
+				for cutAt < len(n.log) && n.log[cutAt].Index < pbEntry.Index {
+					cutAt++
+				}
+				n.log = n.log[:cutAt]
+				truncated = true
+				// Fall through to append below.
+			}
+			// ok=false: entry not present → append below.
+		}
+		n.log = append(n.log, LogEntry{
+			Index: pbEntry.Index,
+			Term:  pbEntry.Term,
+			Data:  pbEntry.Data,
+		})
+	}
+
+	// §5.3: Advance commitIndex if leaderCommit is ahead.
+	if args.LeaderCommit > n.commitIndex {
+		lastIdx, _ := n.lastEntry()
+		if args.LeaderCommit < lastIdx {
+			n.commitIndex = args.LeaderCommit
+		} else {
+			n.commitIndex = lastIdx
+		}
+	}
+
+	return AppendEntriesResult{Term: n.currentTerm, Success: true}
 }
 
 // HandleRequestVote processes an incoming RequestVote RPC.
@@ -190,16 +331,13 @@ func (n *RaftNode) HandleRequestVote(term int64, candidateID string, lastLogInde
 //   - Higher lastLogTerm wins unconditionally.
 //   - Equal lastLogTerm: longer log (higher lastLogIndex) wins.
 //
-// This is the invariant that guarantees a newly elected leader always holds
-// all committed entries — because any committed entry was replicated to a
-// majority, and a candidate needs votes from a majority, so at least one
-// voter in that majority has the entry and will deny votes to any candidate
-// that is missing it.
+// Must be called with mu held.
 func (n *RaftNode) candidateLogUpToDate(candidateLastLogIndex, candidateLastLogTerm int64) bool {
-	if candidateLastLogTerm != n.lastLogTerm {
-		return candidateLastLogTerm > n.lastLogTerm
+	ourIdx, ourTerm := n.lastEntry()
+	if candidateLastLogTerm != ourTerm {
+		return candidateLastLogTerm > ourTerm
 	}
-	return candidateLastLogIndex >= n.lastLogIndex
+	return candidateLastLogIndex >= ourIdx
 }
 
 // Run starts the Raft state machine. Blocks until ctx is cancelled.
@@ -272,8 +410,7 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 	n.mu.Lock()
 	n.currentTerm++
 	term := n.currentTerm
-	lastLogIndex := n.lastLogIndex
-	lastLogTerm := n.lastLogTerm
+	lastLogIndex, lastLogTerm := n.lastEntry()
 	n.votedFor = n.id
 	n.role = RoleCandidate
 	if n.meta != nil {
@@ -376,12 +513,25 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 }
 
 // runLeader runs the Leader state:
-//  1. Send AppendEntries (heartbeat) to all peers every HeartbeatInterval.
-//  2. If any peer responds with higher term → step down to Follower.
-//  3. Exits when ctx is cancelled or role changes externally (HandleAppendEntries from higher-term leader).
+//  1. Initialise nextIndex[] and matchIndex[] per §5.3.
+//  2. Send AppendEntries to all peers every HeartbeatInterval.
+//  3. If any peer responds with higher term → step down to Follower.
+//  4. Exits when ctx is cancelled or role changes externally.
 func (n *RaftNode) runLeader(ctx context.Context) {
 	n.mu.Lock()
 	term := n.currentTerm
+	lastIdx, _ := n.lastEntry()
+	// Initialise leader volatile state (§5.3).
+	// nextIndex: optimistic — assume peer is fully caught up.
+	// matchIndex: pessimistic — assume nothing has been confirmed.
+	if n.peers != nil {
+		n.nextIndex = make(map[string]int64, len(n.peers.clients))
+		n.matchIndex = make(map[string]int64, len(n.peers.clients))
+		for addr := range n.peers.clients {
+			n.nextIndex[addr] = lastIdx + 1
+			n.matchIndex[addr] = 0
+		}
+	}
 	n.mu.Unlock()
 
 	slog.Info("raft: became leader", "id", n.id, "term", term)
@@ -414,29 +564,88 @@ func (n *RaftNode) runLeader(ctx context.Context) {
 }
 
 // sendHeartbeats sends AppendEntries to all peers concurrently.
-// If any peer returns a higher term, this node steps down.
+// For Phase 5b, each call may carry log entries for peers that are behind
+// (nextIndex[peer] ≤ lastLogIndex). If any peer returns a higher term, this
+// node steps down. Successful replication advances matchIndex and may advance
+// commitIndex when a quorum is reached (§5.4.2: only entries from currentTerm).
 func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term int64) {
 	if len(peers) == 0 {
 		return
 	}
 
 	type result struct {
+		addr     string
 		respTerm int64
-		err      error
+		resp     *pb.AppendEntriesResponse
+		// prevLogIndex of the batch we sent, so we can update nextIndex on failure.
+		prevLogIndex int64
+		// lastSentIndex is the highest index in the batch we sent (0 for heartbeat).
+		lastSentIndex int64
+		err           error
 	}
 	ch := make(chan result, len(peers))
 
+	n.mu.Lock()
+	lastIdx, _ := n.lastEntry()
+	// Snapshot the entries we'll send per peer.
+	type peerArgs struct {
+		client       *RaftClient
+		addr         string
+		args         AppendEntriesArgs
+		lastSentIdx  int64
+	}
+	sends := make([]peerArgs, 0, len(peers))
 	for _, peer := range peers {
-		peer := peer
+		ni := n.nextIndex[peer.addr]
+		prevIdx := ni - 1
+		var prevTerm int64
+		if prevIdx > 0 {
+			if e, ok := n.entryAt(prevIdx); ok {
+				prevTerm = e.Term
+			}
+		}
+		var entries []*pb.LogEntry
+		lastSentIdx := int64(0)
+		for _, e := range n.log {
+			if e.Index >= ni {
+				entries = append(entries, &pb.LogEntry{
+					Index: e.Index,
+					Term:  e.Term,
+					Data:  e.Data,
+				})
+				lastSentIdx = e.Index
+			}
+		}
+		sends = append(sends, peerArgs{
+			client: peer,
+			addr:   peer.addr,
+			args: AppendEntriesArgs{
+				Term:         term,
+				LeaderID:     n.id,
+				PrevLogIndex: prevIdx,
+				PrevLogTerm:  prevTerm,
+				Entries:      entries,
+				LeaderCommit: n.commitIndex,
+			},
+			lastSentIdx: lastSentIdx,
+		})
+	}
+	n.mu.Unlock()
+
+	for _, s := range sends {
+		s := s
 		go func() {
-			resp, err := peer.AppendEntries(term, n.id)
+			resp, err := s.client.AppendEntries(s.args)
 			if err != nil {
-				ch <- result{err: err}
+				ch <- result{addr: s.addr, err: err, prevLogIndex: s.args.PrevLogIndex, lastSentIndex: s.lastSentIdx}
 				return
 			}
-			ch <- result{respTerm: resp.Term}
+			ch <- result{addr: s.addr, respTerm: resp.Term, resp: resp, prevLogIndex: s.args.PrevLogIndex, lastSentIndex: s.lastSentIdx}
 		}()
 	}
+
+	total := len(peers) + 1 // +1 for self
+	majority := total/2 + 1
 
 	for range peers {
 		select {
@@ -458,6 +667,80 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 					"id", n.id, "new_term", res.respTerm)
 				return
 			}
+			if res.resp == nil {
+				continue
+			}
+			n.mu.Lock()
+			if res.resp.Success {
+				// Update matchIndex and nextIndex for the peer.
+				if res.lastSentIndex > n.matchIndex[res.addr] {
+					n.matchIndex[res.addr] = res.lastSentIndex
+				}
+				n.nextIndex[res.addr] = n.matchIndex[res.addr] + 1
+
+				// §5.4.2: advance commitIndex if a quorum has replicated an
+				// entry from the currentTerm.
+				n.maybeAdvanceCommitIndex(term, lastIdx, majority)
+			} else {
+				// Fast Backup: jump nextIndex using conflictIndex/conflictTerm.
+				ci := res.resp.ConflictIndex
+				ct := res.resp.ConflictTerm
+				if ct == 0 || ci == 0 {
+					// Follower has no entry at prevLogIndex: jump to ci.
+					if ci > 0 {
+						n.nextIndex[res.addr] = ci
+					} else {
+						n.nextIndex[res.addr] = 1
+					}
+				} else {
+					// Find the last index in our log with term == ct.
+					// If we have it, set nextIndex to the index after our last ct entry.
+					// If we don't have it, set nextIndex to ci.
+					found := false
+					for i := len(n.log) - 1; i >= 0; i-- {
+						if n.log[i].Term == ct {
+							n.nextIndex[res.addr] = n.log[i].Index + 1
+							found = true
+							break
+						}
+					}
+					if !found {
+						n.nextIndex[res.addr] = ci
+					}
+				}
+				// nextIndex must always be at least 1.
+				if n.nextIndex[res.addr] < 1 {
+					n.nextIndex[res.addr] = 1
+				}
+			}
+			n.mu.Unlock()
+		}
+	}
+}
+
+// maybeAdvanceCommitIndex advances commitIndex to the highest N such that:
+//   - N > commitIndex
+//   - a majority of nodes have matchIndex[peer] ≥ N
+//   - log[N].term == currentTerm  (§5.4.2 safety: never commit from prior terms alone)
+//
+// Must be called with mu held.
+func (n *RaftNode) maybeAdvanceCommitIndex(currentTerm, lastIdx int64, majority int) {
+	for N := lastIdx; N > n.commitIndex; N-- {
+		e, ok := n.entryAt(N)
+		if !ok || e.Term != currentTerm {
+			continue
+		}
+		// Count replicas that have matched at least N (self always counts).
+		count := 1
+		for _, m := range n.matchIndex {
+			if m >= N {
+				count++
+			}
+		}
+		if count >= majority {
+			n.commitIndex = N
+			slog.Info("raft: commitIndex advanced", "id", n.id, "commitIndex", N)
+			break
 		}
 	}
 }

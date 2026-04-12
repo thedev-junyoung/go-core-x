@@ -48,14 +48,18 @@ func (c *RaftClient) RequestVote(term int64, candidateID string, lastLogIndex, l
 	})
 }
 
-// AppendEntries sends an AppendEntries (heartbeat) RPC.
+// AppendEntries sends an AppendEntries RPC (heartbeat or log replication).
 // Returns nil, err on timeout or network failure.
-func (c *RaftClient) AppendEntries(term int64, leaderID string) (*pb.AppendEntriesResponse, error) {
+func (c *RaftClient) AppendEntries(args AppendEntriesArgs) (*pb.AppendEntriesResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
 	return c.rpc.AppendEntries(ctx, &pb.AppendEntriesRequest{
-		Term:     term,
-		LeaderId: leaderID,
+		Term:         args.Term,
+		LeaderId:     args.LeaderID,
+		PrevLogIndex: args.PrevLogIndex,
+		PrevLogTerm:  args.PrevLogTerm,
+		Entries:      args.Entries,
+		LeaderCommit: args.LeaderCommit,
 	})
 }
 

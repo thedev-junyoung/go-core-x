@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.1
 // - protoc             v7.34.1
-// source: proto/ingest.proto
+// source: ingest.proto
 
 package pb
 
@@ -121,7 +121,7 @@ var IngestionService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/ingest.proto",
+	Metadata: "ingest.proto",
 }
 
 const (
@@ -234,7 +234,7 @@ var ReplicationService_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "proto/ingest.proto",
+	Metadata: "ingest.proto",
 }
 
 const (
@@ -340,7 +340,7 @@ var KVService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/ingest.proto",
+	Metadata: "ingest.proto",
 }
 
 const (
@@ -353,12 +353,11 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // RaftService implements Phase 5a leader election RPCs.
-// Phase 5b will extend AppendEntries with log entries.
+// Phase 5b extends AppendEntries with log entries (§5.3 Log Matching).
 type RaftServiceClient interface {
 	// RequestVote is sent by a Candidate to collect votes.
 	RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error)
-	// AppendEntries is sent by the Leader as a heartbeat.
-	// In Phase 5a it carries no log entries.
+	// AppendEntries is sent by the Leader for heartbeats and log replication (§5.3).
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
 }
 
@@ -395,12 +394,11 @@ func (c *raftServiceClient) AppendEntries(ctx context.Context, in *AppendEntries
 // for forward compatibility.
 //
 // RaftService implements Phase 5a leader election RPCs.
-// Phase 5b will extend AppendEntries with log entries.
+// Phase 5b extends AppendEntries with log entries (§5.3 Log Matching).
 type RaftServiceServer interface {
 	// RequestVote is sent by a Candidate to collect votes.
 	RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error)
-	// AppendEntries is sent by the Leader as a heartbeat.
-	// In Phase 5a it carries no log entries.
+	// AppendEntries is sent by the Leader for heartbeats and log replication (§5.3).
 	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
 	mustEmbedUnimplementedRaftServiceServer()
 }
@@ -492,5 +490,5 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/ingest.proto",
+	Metadata: "ingest.proto",
 }

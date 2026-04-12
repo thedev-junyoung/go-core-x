@@ -94,6 +94,14 @@ core-x/
         │   ├── ring_test.go
         │   ├── node.go             # Node struct (ID, Addr, healthy atomic.Bool)
         │   └── membership.go       # 노드 health probe goroutine
+        ├── raft/                       # Phase 5: Raft 합의 모듈
+        │   ├── state.go            # RaftRole, 상수 (timeout, heartbeat interval)
+        │   ├── node.go             # RaftNode 상태 머신 (§5.2, §5.3, §5.4)
+        │   ├── node_test.go
+        │   ├── server.go           # RaftHandler gRPC 서버
+        │   ├── server_test.go
+        │   ├── client.go           # RaftClient (RequestVote / AppendEntries gRPC 호출)
+        │   └── meta_store.go       # MetaStore — raft_meta.bin 영속화 (CRC32)
         ├── grpc/                       # Phase 3: 노드 간 gRPC 통신
         │   ├── server.go           # gRPC IngestionService 구현
         │   ├── client.go           # gRPC client pool (nodeID → *ClientConn)
@@ -305,6 +313,15 @@ POST /ingest {source: "user-x", payload: "..."}
                                 └─ node-2 unhealthy? → HTTP 503
 ```
 
+### Phase 5b 운영 참고: raft_meta.bin
+
+Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `raft_meta.bin` (269 bytes)을 생성한다.
+이 파일은 `currentTerm`과 `votedFor`를 영속화하며, 재시작 시 O(1)로 복구된다.
+
+- **파일이 없으면**: `term=0`, `votedFor=""` 초기 상태로 시작 (정상)
+- **백업·복구 시**: WAL(`wal.log`)과 함께 반드시 포함해야 한다
+- **CRC32 불일치 감지 시**: 노드가 시작을 거부하고 에러를 로깅한다
+
 ### Virtual Nodes Ring
 
 - 노드당 150 vnodes (기본값, `CORE_X_VNODE_COUNT`로 조정 가능)
@@ -344,10 +361,13 @@ POST /ingest {source: "user-x", payload: "..."}
 - [x] Prometheus 메트릭 — `core_x_raft_term`, `core_x_raft_is_leader`
 - [x] 클러스터 모드에서 RaftNode 자동 시작
 
-### Phase 5b: Raft Log Replication (Next)
-- [ ] AppendEntries에 WAL log entries 포함
-- [ ] Raft commit index 추적
-- [ ] Raft Leader → replication Primary 자동 승격 연결
+### Phase 5b: Raft Log Replication (In Progress)
+- [x] MetaStore — `raft_meta.bin` 영속화 (`currentTerm`, `votedFor`, CRC32 무결성) ✅
+- [x] §5.3 Log Matching — `AppendEntries` proto 확장, `prevLogIndex/prevLogTerm` 검증 ✅
+- [x] Fast Backup — `conflictIndex/conflictTerm` 기반 O(1) nextIndex 수렴 ✅
+- [x] `commitIndex` 추적 + §5.4.2 Current Term Only Commit ✅
+- [ ] RoleController — Raft 역할 변화를 ReplicationManager에 전달 (진행 중)
+- [ ] `cmd/main.go` 정적 `CORE_X_ROLE` → RoleController 전환
 
 ---
 
@@ -375,12 +395,15 @@ POST /ingest {source: "user-x", payload: "..."}
 ### Phase 5a (Complete)
 - [ADR-010: Raft 리더 선출](docs/adr/0010-raft-leader-election.md)
 
+### Phase 5b (In Progress)
+- [ADR-011: Raft 메타데이터 영속화, §5.3 Log Replication, 역할 전환](docs/adr/011-raft-log-persistence-and-role-transition.md)
+
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 
 ---
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Current Status**: Phase 5a Complete (2026-04-11)
-- **Completed**: Phase 5a — Raft Leader Election
-- **Next**: Phase 5b — Raft Log Replication
+- **Current Status**: Phase 5b In Progress (2026-04-12)
+- **Completed**: Phase 5a — Raft Leader Election, Phase 5b (MetaStore + §5.3 Log Matching)
+- **Next**: Phase 5b RoleController → Phase 5c WAL 연동
