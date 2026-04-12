@@ -370,11 +370,20 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 - [x] ManagedReplicationServer — atomic flag null-object 패턴으로 gRPC 역할 전환
 - [x] `cmd/main.go` 정적 `CORE_X_ROLE` 제거 → RoleController 자동 전환
 
-### Phase 5c: WAL-Backed Log Persistence (Next)
-- [ ] `LogEntry` 슬라이스 → WAL append 기반 영속화
-- [ ] 재시작 시 WAL에서 Raft 로그 복구 (`lastLogIndex`, `lastLogTerm` 재건)
-- [ ] Log compaction 연동 — snapshot + truncate 지원
-- [ ] ADR-012: Raft 로그 영속화 설계 근거
+### Phase 5c: WAL-Backed Log Persistence ✅ COMPLETE (2026-04-12)
+- [x] `LogStore` 인터페이스 — `Append`, `TruncateSuffix`, `LoadAll`, `Close`
+- [x] `WALLogStore` — 기존 `wal.Writer`/`wal.Reader` 재사용, `SyncImmediate` 정책
+- [x] `MemLogStore` — 테스트용 인메모리 구현
+- [x] `HandleAppendEntries` persist-before-update (truncation + append)
+- [x] `NewRaftNode` startup 시 `LoadAll()`로 로그 복구
+- [x] `cmd/main.go` `WALLogStore` 주입 (`data/raft_log.wal`)
+- [x] ADR-012: Raft 로그 WAL 영속화 설계 근거
+
+### Phase 5d: Leader Write Path (Next)
+- [ ] `Propose(data []byte)` — 클라이언트 요청을 Raft 로그에 append
+- [ ] Leader가 자신의 로그에 persist-before-send
+- [ ] Apply channel — `commitIndex` 진전 시 상태 머신에 반영
+- [ ] ADR-013: Raft write path 설계
 
 ---
 
@@ -405,12 +414,15 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 ### Phase 5b (Complete)
 - [ADR-011: Raft 메타데이터 영속화, §5.3 Log Replication, 역할 전환](docs/adr/011-raft-log-persistence-and-role-transition.md)
 
+### Phase 5c (Complete)
+- [ADR-012: Raft 로그 WAL 영속화](docs/adr/012-raft-log-wal-persistence.md)
+
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 
 ---
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Current Status**: Phase 5c 진행 예정 (2026-04-12)
-- **Completed**: Phase 5a — Raft Leader Election, Phase 5b — Log Replication + Role Transition
-- **Next**: Phase 5c — WAL 연동으로 Raft 로그 영속화
+- **Current Status**: Phase 5c Complete (2026-04-12)
+- **Completed**: Phase 5a/5b/5c — Raft Leader Election, Log Replication, Log Persistence
+- **Next**: Phase 5d — Leader Write Path (`Propose` + Apply channel)

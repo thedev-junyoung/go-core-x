@@ -379,7 +379,17 @@ func main() {
 		}
 		defer metaStore.Close()
 
-		raftNode = infraraft.NewRaftNode(nodeID, peerClients, metaStore)
+		// Phase 5c: WALLogStore — persists Raft log entries across restarts.
+		// Stored in data/raft_log.wal (same directory as events.wal and raft_meta.bin).
+		raftLogPath := filepath.Join(filepath.Dir(walPath), "raft_log.wal")
+		raftLogStore, raftLogErr := infraraft.NewWALLogStore(raftLogPath)
+		if raftLogErr != nil {
+			slog.Error("raft: failed to open log store", "path", raftLogPath, "err", raftLogErr)
+			os.Exit(1)
+		}
+		defer raftLogStore.Close()
+
+		raftNode = infraraft.NewRaftNode(nodeID, peerClients, metaStore, raftLogStore)
 		raftServer := infraraft.NewRaftServer(raftNode)
 		grpcSrv.RegisterRaftService(raftServer)
 
