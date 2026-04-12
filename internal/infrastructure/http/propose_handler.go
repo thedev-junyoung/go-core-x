@@ -19,13 +19,16 @@ const proposeApplyTimeout = 5 * time.Second
 // Both endpoints are served by ProposeHandler and registered separately in
 // the HTTP mux to keep routing explicit.
 type ProposeHandler struct {
-	node *infraraft.RaftNode
-	sm   *infraraft.KVStateMachine
+	node    *infraraft.RaftNode
+	sm      *infraraft.KVStateMachine
+	addrMap map[string]string // nodeID → HTTP base URL (e.g. "http://host:port"), may be nil
 }
 
 // NewProposeHandler creates a ProposeHandler.
-func NewProposeHandler(node *infraraft.RaftNode, sm *infraraft.KVStateMachine) *ProposeHandler {
-	return &ProposeHandler{node: node, sm: sm}
+// addrMap maps Raft node IDs to HTTP base URLs used for leader redirect.
+// Pass nil to disable redirect (returns 503 when not leader instead).
+func NewProposeHandler(node *infraraft.RaftNode, sm *infraraft.KVStateMachine, addrMap map[string]string) *ProposeHandler {
+	return &ProposeHandler{node: node, sm: sm, addrMap: addrMap}
 }
 
 // proposeRequest is the JSON body for POST /raft/kv.
@@ -66,6 +69,12 @@ func (h *ProposeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	index, _, isLeader := h.node.Propose(data)
 	if !isLeader {
+		if leaderID := h.node.LeaderID(); leaderID != "" {
+			if baseURL, ok := h.addrMap[leaderID]; ok {
+				http.Redirect(w, r, baseURL+"/raft/kv", http.StatusTemporaryRedirect)
+				return
+			}
+		}
 		http.Error(w, "not the Raft leader — retry on the leader node", http.StatusServiceUnavailable)
 		return
 	}

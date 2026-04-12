@@ -40,7 +40,7 @@ func TestProposeHandler_SetAndRead(t *testing.T) {
 	defer smCancel()
 	go sm.Run(smCtx, node.ApplyCh())
 
-	h := NewProposeHandler(node, sm)
+	h := NewProposeHandler(node, sm, nil)
 
 	body := `{"key":"name","value":"core-x"}`
 	req := httptest.NewRequest(http.MethodPost, "/raft/kv", bytes.NewBufferString(body))
@@ -63,7 +63,7 @@ func TestProposeHandler_NotLeader(t *testing.T) {
 	// A node that has never run will not be leader.
 	node := infraraft.NewRaftNode("n1", nil, nil, nil)
 	sm := infraraft.NewKVStateMachine()
-	h := NewProposeHandler(node, sm)
+	h := NewProposeHandler(node, sm, nil)
 
 	body := `{"key":"k","value":"v"}`
 	req := httptest.NewRequest(http.MethodPost, "/raft/kv", bytes.NewBufferString(body))
@@ -75,10 +75,34 @@ func TestProposeHandler_NotLeader(t *testing.T) {
 	}
 }
 
+func TestProposeHandler_LeaderRedirect(t *testing.T) {
+	// Simulate a follower that knows the leader is "n2".
+	node := infraraft.NewRaftNode("n1", nil, nil, nil)
+	node.ForceLeaderID("n2") // set knownLeaderID without running
+
+	sm := infraraft.NewKVStateMachine()
+	addrMap := map[string]string{
+		"n2": "http://node2:8081",
+	}
+	h := NewProposeHandler(node, sm, addrMap)
+
+	body := `{"key":"k","value":"v"}`
+	req := httptest.NewRequest(http.MethodPost, "/raft/kv", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "http://node2:8081/raft/kv" {
+		t.Fatalf("expected Location=http://node2:8081/raft/kv, got %q", loc)
+	}
+}
+
 func TestProposeHandler_MissingKey(t *testing.T) {
 	node := infraraft.NewRaftNode("n1", nil, nil, nil)
 	sm := infraraft.NewKVStateMachine()
-	h := NewProposeHandler(node, sm)
+	h := NewProposeHandler(node, sm, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/raft/kv", bytes.NewBufferString(`{"value":"v"}`))
 	rec := httptest.NewRecorder()

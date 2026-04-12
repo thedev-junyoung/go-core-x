@@ -33,6 +33,7 @@ type RaftNode struct {
 	currentTerm int64
 	votedFor    string   // nodeID that received our vote this term; "" = none
 	role        RaftRole
+	leaderID    string   // nodeID of the current known leader; "" = unknown
 
 	// Raft §5.3 Log state.
 	// log is 0-indexed; log[i].Index == i+1 (1-based Raft indices).
@@ -113,6 +114,14 @@ func (n *RaftNode) Term() int64 {
 	return n.currentTerm
 }
 
+// LeaderID returns the node ID of the current known leader, or "" if unknown.
+// Safe to call from any goroutine.
+func (n *RaftNode) LeaderID() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.leaderID
+}
+
 // RoleString returns the current role as a string. Used by metrics.
 func (n *RaftNode) RoleString() string {
 	return n.Role().String()
@@ -124,6 +133,13 @@ func (n *RaftNode) ForceRole(role RaftRole, term int64) {
 	defer n.mu.Unlock()
 	n.role = role
 	n.currentTerm = term
+}
+
+// ForceLeaderID sets the known leader ID directly. Used only in tests.
+func (n *RaftNode) ForceLeaderID(id string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.leaderID = id
 }
 
 // ForceLog appends a synthetic log entry with the given index and term.
@@ -214,6 +230,7 @@ func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesResu
 		}
 	}
 	n.role = RoleFollower
+	n.leaderID = args.LeaderID
 
 	// Signal the run loop to reset the election timer (non-blocking).
 	select {
@@ -657,6 +674,7 @@ func (n *RaftNode) runLeader(ctx context.Context) {
 			n.matchIndex[addr] = 0
 		}
 	}
+	n.leaderID = n.id
 	n.mu.Unlock()
 
 	slog.Info("raft: became leader", "id", n.id, "term", term)
