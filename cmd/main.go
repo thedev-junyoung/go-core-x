@@ -346,7 +346,10 @@ func main() {
 	// --- Phase 5a: Raft Leader Election ------------------------------------
 	// Raft is only activated in cluster mode (nodeID + grpcAddr + grpcSrv configured).
 	// Standalone mode skips Raft entirely.
-	var raftNode *infraraft.RaftNode
+	var (
+		raftNode *infraraft.RaftNode
+		raftKVSM *infraraft.KVStateMachine
+	)
 
 	if nodeID != "" && grpcAddr != "" && grpcSrv != nil {
 		var peerAddrs []string
@@ -404,6 +407,11 @@ func main() {
 			"meta_path", metaPath,
 		)
 
+		// Phase 6: KV state machine — consumes ApplyCh, applies committed entries.
+		raftKVSM = infraraft.NewKVStateMachine()
+		go raftKVSM.Run(raftCtx, raftNode.ApplyCh())
+		slog.Info("raft: kv state machine started")
+
 		// Phase 5b: RoleController — 50ms polling, drives ReplicationManager.
 		if replManager != nil {
 			rc := cluster.NewRoleController(raftNode, replManager, 50*time.Millisecond)
@@ -451,6 +459,12 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+
+	// Phase 6: Raft KV endpoints — only registered when Raft is active.
+	if raftNode != nil && raftKVSM != nil {
+		mux.Handle("POST /raft/kv", infrahttp.NewProposeHandler(raftNode, raftKVSM))
+		mux.Handle("GET /raft/kv/{key}", infrahttp.NewRaftKVGetHandler(raftKVSM))
+	}
 
 	// --- HTTP 서버 (HTTP Server) ---------------------------------------------
 	// 명시적 타임아웃은 선택 사항이 아니다.
