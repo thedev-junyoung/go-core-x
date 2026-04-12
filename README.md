@@ -386,6 +386,14 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 - [x] 단일 노드 fast-path — heartbeat tick마다 즉시 `maybeAdvanceCommitIndex`
 - [x] ADR-013: Propose + Apply channel 설계 근거
 
+### Phase 6: Raft KV State Machine + HTTP 연동 ✅ COMPLETE (2026-04-12)
+- [x] `KVStateMachine` — `ApplyCh()` 소비, in-memory map에 set/del 반영
+- [x] `WaitForIndex(ctx, index)` — 동기 apply-wait (선형적 읽기-후-쓰기 보장)
+- [x] `POST /raft/kv` — JSON body `{op, key, value}` → Propose → 204 No Content
+- [x] `GET /raft/kv/{key}` — Raft 상태 머신에서 직접 읽기
+- [x] 리더가 아닐 때 503 반환 (클라이언트 재시도/redirect 처리)
+- [x] ADR-014: KV 상태 머신 + HTTP 연동 설계 근거
+
 ---
 
 ## Architecture Decision Records (ADR)
@@ -421,12 +429,15 @@ Raft가 활성화된 클러스터에서 각 노드는 작업 디렉토리에 `ra
 ### Phase 5d (Complete)
 - [ADR-013: Raft Write Path — Propose + Apply Channel](docs/adr/013-raft-write-path.md)
 
+### Phase 6 (Complete)
+- [ADR-014: Raft KV State Machine — HTTP Propose + Apply-Wait](docs/adr/014-raft-kv-state-machine.md)
+
 각 ADR은 설계 결정의 context, decision, consequences를 기록합니다.
 
 ---
 
 ## Project Owner (CEO/CTO)
 - **Role**: Architecture Design, Code Review, Performance Monitoring
-- **Current Status**: Phase 5d Complete (2026-04-12)
-- **Completed**: Phase 5a/5b/5c/5d — Leader Election, Log Replication, Log Persistence, Write Path
-- **Next**: Phase 6 — HTTP `/propose` endpoint → Raft → KV 상태 머신 연동
+- **Current Status**: Phase 6 Complete (2026-04-12)
+- **Completed**: Phase 5a/5b/5c/5d/6 — Leader Election, Log Replication, Log Persistence, Write Path, KV State Machine HTTP
+- **Next**: Phase 7 — Raft 멀티 노드 통합 테스트 + 리더 redirect
