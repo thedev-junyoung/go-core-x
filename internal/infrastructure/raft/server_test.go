@@ -16,9 +16,9 @@ type fakeNode struct {
 	currentTerm               int64
 }
 
-func (f *fakeNode) HandleAppendEntries(term int64, leaderID string) (currentTerm int64, success bool) {
+func (f *fakeNode) HandleAppendEntries(args raft.AppendEntriesArgs) raft.AppendEntriesResult {
 	f.handleAppendEntriesCalled = true
-	return f.currentTerm, true
+	return raft.AppendEntriesResult{Term: f.currentTerm, Success: true}
 }
 
 func (f *fakeNode) HandleRequestVote(term int64, candidateID string, lastLogIndex, lastLogTerm int64) (currentTerm int64, voteGranted bool) {

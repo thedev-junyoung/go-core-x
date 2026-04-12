@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v7.34.1
-// source: proto/ingest.proto
+// source: ingest.proto
 
 package pb
 
@@ -32,7 +32,7 @@ type IngestRequest struct {
 
 func (x *IngestRequest) Reset() {
 	*x = IngestRequest{}
-	mi := &file_proto_ingest_proto_msgTypes[0]
+	mi := &file_ingest_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -44,7 +44,7 @@ func (x *IngestRequest) String() string {
 func (*IngestRequest) ProtoMessage() {}
 
 func (x *IngestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[0]
+	mi := &file_ingest_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -57,7 +57,7 @@ func (x *IngestRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestRequest.ProtoReflect.Descriptor instead.
 func (*IngestRequest) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{0}
+	return file_ingest_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *IngestRequest) GetSource() string {
@@ -85,7 +85,7 @@ type IngestResponse struct {
 
 func (x *IngestResponse) Reset() {
 	*x = IngestResponse{}
-	mi := &file_proto_ingest_proto_msgTypes[1]
+	mi := &file_ingest_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -97,7 +97,7 @@ func (x *IngestResponse) String() string {
 func (*IngestResponse) ProtoMessage() {}
 
 func (x *IngestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[1]
+	mi := &file_ingest_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -110,7 +110,7 @@ func (x *IngestResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestResponse.ProtoReflect.Descriptor instead.
 func (*IngestResponse) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{1}
+	return file_ingest_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *IngestResponse) GetOk() bool {
@@ -138,7 +138,7 @@ type StreamWALRequest struct {
 
 func (x *StreamWALRequest) Reset() {
 	*x = StreamWALRequest{}
-	mi := &file_proto_ingest_proto_msgTypes[2]
+	mi := &file_ingest_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -150,7 +150,7 @@ func (x *StreamWALRequest) String() string {
 func (*StreamWALRequest) ProtoMessage() {}
 
 func (x *StreamWALRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[2]
+	mi := &file_ingest_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -163,7 +163,7 @@ func (x *StreamWALRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamWALRequest.ProtoReflect.Descriptor instead.
 func (*StreamWALRequest) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{2}
+	return file_ingest_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *StreamWALRequest) GetReplicaId() string {
@@ -192,7 +192,7 @@ type WALEntry struct {
 
 func (x *WALEntry) Reset() {
 	*x = WALEntry{}
-	mi := &file_proto_ingest_proto_msgTypes[3]
+	mi := &file_ingest_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -204,7 +204,7 @@ func (x *WALEntry) String() string {
 func (*WALEntry) ProtoMessage() {}
 
 func (x *WALEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[3]
+	mi := &file_ingest_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -217,7 +217,7 @@ func (x *WALEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WALEntry.ProtoReflect.Descriptor instead.
 func (*WALEntry) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{3}
+	return file_ingest_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *WALEntry) GetOffset() int64 {
@@ -251,7 +251,7 @@ type GetRequest struct {
 
 func (x *GetRequest) Reset() {
 	*x = GetRequest{}
-	mi := &file_proto_ingest_proto_msgTypes[4]
+	mi := &file_ingest_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -263,7 +263,7 @@ func (x *GetRequest) String() string {
 func (*GetRequest) ProtoMessage() {}
 
 func (x *GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[4]
+	mi := &file_ingest_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -276,7 +276,7 @@ func (x *GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{4}
+	return file_ingest_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetRequest) GetKey() string {
@@ -299,7 +299,7 @@ type GetResponse struct {
 
 func (x *GetResponse) Reset() {
 	*x = GetResponse{}
-	mi := &file_proto_ingest_proto_msgTypes[5]
+	mi := &file_ingest_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -311,7 +311,7 @@ func (x *GetResponse) String() string {
 func (*GetResponse) ProtoMessage() {}
 
 func (x *GetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[5]
+	mi := &file_ingest_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -324,7 +324,7 @@ func (x *GetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResponse.ProtoReflect.Descriptor instead.
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{5}
+	return file_ingest_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetResponse) GetFound() bool {
@@ -355,6 +355,67 @@ func (x *GetResponse) GetReceivedAtUnixNs() int64 {
 	return 0
 }
 
+// LogEntry is a single Raft log record (§5.3).
+type LogEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Index         int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"` // 1-based log position
+	Term          int64                  `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`   // term when the entry was received by the leader
+	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`    // opaque command payload
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LogEntry) Reset() {
+	*x = LogEntry{}
+	mi := &file_ingest_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogEntry) ProtoMessage() {}
+
+func (x *LogEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_ingest_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogEntry.ProtoReflect.Descriptor instead.
+func (*LogEntry) Descriptor() ([]byte, []int) {
+	return file_ingest_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *LogEntry) GetIndex() int64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *LogEntry) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *LogEntry) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
 // RequestVoteRequest is sent by a Candidate to each peer.
 type RequestVoteRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -368,7 +429,7 @@ type RequestVoteRequest struct {
 
 func (x *RequestVoteRequest) Reset() {
 	*x = RequestVoteRequest{}
-	mi := &file_proto_ingest_proto_msgTypes[6]
+	mi := &file_ingest_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -380,7 +441,7 @@ func (x *RequestVoteRequest) String() string {
 func (*RequestVoteRequest) ProtoMessage() {}
 
 func (x *RequestVoteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[6]
+	mi := &file_ingest_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -393,7 +454,7 @@ func (x *RequestVoteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestVoteRequest.ProtoReflect.Descriptor instead.
 func (*RequestVoteRequest) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{6}
+	return file_ingest_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RequestVoteRequest) GetTerm() int64 {
@@ -435,7 +496,7 @@ type RequestVoteResponse struct {
 
 func (x *RequestVoteResponse) Reset() {
 	*x = RequestVoteResponse{}
-	mi := &file_proto_ingest_proto_msgTypes[7]
+	mi := &file_ingest_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -447,7 +508,7 @@ func (x *RequestVoteResponse) String() string {
 func (*RequestVoteResponse) ProtoMessage() {}
 
 func (x *RequestVoteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[7]
+	mi := &file_ingest_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -460,7 +521,7 @@ func (x *RequestVoteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestVoteResponse.ProtoReflect.Descriptor instead.
 func (*RequestVoteResponse) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{7}
+	return file_ingest_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RequestVoteResponse) GetTerm() int64 {
@@ -477,19 +538,22 @@ func (x *RequestVoteResponse) GetVoteGranted() bool {
 	return false
 }
 
-// AppendEntriesRequest is sent by the Leader as a periodic heartbeat.
-// TODO(phase5b): add entries, prev_log_index, prev_log_term, leader_commit.
+// AppendEntriesRequest is sent by the Leader as heartbeat or log replication (§5.3).
 type AppendEntriesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                        // Leader's current term
-	LeaderId      string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"` // Leader's node ID
+	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`                                       // Leader's current term
+	LeaderId      string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`                // Leader's node ID
+	PrevLogIndex  int64                  `protobuf:"varint,3,opt,name=prev_log_index,json=prevLogIndex,proto3" json:"prev_log_index,omitempty"` // Index of log entry immediately preceding new ones
+	PrevLogTerm   int64                  `protobuf:"varint,4,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`    // Term of prev_log_index entry
+	Entries       []*LogEntry            `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"`                                  // Log entries to store (empty for heartbeat)
+	LeaderCommit  int64                  `protobuf:"varint,6,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`   // Leader's commitIndex
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AppendEntriesRequest) Reset() {
 	*x = AppendEntriesRequest{}
-	mi := &file_proto_ingest_proto_msgTypes[8]
+	mi := &file_ingest_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -501,7 +565,7 @@ func (x *AppendEntriesRequest) String() string {
 func (*AppendEntriesRequest) ProtoMessage() {}
 
 func (x *AppendEntriesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[8]
+	mi := &file_ingest_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -514,7 +578,7 @@ func (x *AppendEntriesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendEntriesRequest.ProtoReflect.Descriptor instead.
 func (*AppendEntriesRequest) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{8}
+	return file_ingest_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *AppendEntriesRequest) GetTerm() int64 {
@@ -531,18 +595,50 @@ func (x *AppendEntriesRequest) GetLeaderId() string {
 	return ""
 }
 
+func (x *AppendEntriesRequest) GetPrevLogIndex() int64 {
+	if x != nil {
+		return x.PrevLogIndex
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetPrevLogTerm() int64 {
+	if x != nil {
+		return x.PrevLogTerm
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetEntries() []*LogEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *AppendEntriesRequest) GetLeaderCommit() int64 {
+	if x != nil {
+		return x.LeaderCommit
+	}
+	return 0
+}
+
 // AppendEntriesResponse is the Follower's reply to AppendEntries.
+// conflict_index and conflict_term enable Fast Backup (§5.3 optimization):
+// the leader can skip backward search in O(1) rather than decrementing nextIndex one at a time.
 type AppendEntriesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"` // Responder's current term
 	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
+	ConflictIndex int64                  `protobuf:"varint,3,opt,name=conflict_index,json=conflictIndex,proto3" json:"conflict_index,omitempty"` // First index of conflicting term (Fast Backup)
+	ConflictTerm  int64                  `protobuf:"varint,4,opt,name=conflict_term,json=conflictTerm,proto3" json:"conflict_term,omitempty"`    // Term of the conflicting entry (Fast Backup; 0 = no entry at prevLogIndex)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AppendEntriesResponse) Reset() {
 	*x = AppendEntriesResponse{}
-	mi := &file_proto_ingest_proto_msgTypes[9]
+	mi := &file_ingest_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -554,7 +650,7 @@ func (x *AppendEntriesResponse) String() string {
 func (*AppendEntriesResponse) ProtoMessage() {}
 
 func (x *AppendEntriesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_ingest_proto_msgTypes[9]
+	mi := &file_ingest_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -567,7 +663,7 @@ func (x *AppendEntriesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendEntriesResponse.ProtoReflect.Descriptor instead.
 func (*AppendEntriesResponse) Descriptor() ([]byte, []int) {
-	return file_proto_ingest_proto_rawDescGZIP(), []int{9}
+	return file_ingest_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *AppendEntriesResponse) GetTerm() int64 {
@@ -584,11 +680,25 @@ func (x *AppendEntriesResponse) GetSuccess() bool {
 	return false
 }
 
-var File_proto_ingest_proto protoreflect.FileDescriptor
+func (x *AppendEntriesResponse) GetConflictIndex() int64 {
+	if x != nil {
+		return x.ConflictIndex
+	}
+	return 0
+}
 
-const file_proto_ingest_proto_rawDesc = "" +
+func (x *AppendEntriesResponse) GetConflictTerm() int64 {
+	if x != nil {
+		return x.ConflictTerm
+	}
+	return 0
+}
+
+var File_ingest_proto protoreflect.FileDescriptor
+
+const file_ingest_proto_rawDesc = "" +
 	"\n" +
-	"\x12proto/ingest.proto\x12\x06ingest\"A\n" +
+	"\fingest.proto\x12\x06ingest\"A\n" +
 	"\rIngestRequest\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\":\n" +
@@ -611,7 +721,11 @@ const file_proto_ingest_proto_rawDesc = "" +
 	"\x05found\x18\x01 \x01(\bR\x05found\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\x12\x16\n" +
 	"\x06source\x18\x03 \x01(\tR\x06source\x12-\n" +
-	"\x13received_at_unix_ns\x18\x04 \x01(\x03R\x10receivedAtUnixNs\"\x95\x01\n" +
+	"\x13received_at_unix_ns\x18\x04 \x01(\x03R\x10receivedAtUnixNs\"H\n" +
+	"\bLogEntry\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x12\n" +
+	"\x04term\x18\x02 \x01(\x03R\x04term\x12\x12\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\"\x95\x01\n" +
 	"\x12RequestVoteRequest\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x03R\x04term\x12!\n" +
 	"\fcandidate_id\x18\x02 \x01(\tR\vcandidateId\x12$\n" +
@@ -619,13 +733,19 @@ const file_proto_ingest_proto_rawDesc = "" +
 	"\rlast_log_term\x18\x04 \x01(\x03R\vlastLogTerm\"L\n" +
 	"\x13RequestVoteResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x03R\x04term\x12!\n" +
-	"\fvote_granted\x18\x02 \x01(\bR\vvoteGranted\"G\n" +
+	"\fvote_granted\x18\x02 \x01(\bR\vvoteGranted\"\xe2\x01\n" +
 	"\x14AppendEntriesRequest\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x03R\x04term\x12\x1b\n" +
-	"\tleader_id\x18\x02 \x01(\tR\bleaderId\"E\n" +
+	"\tleader_id\x18\x02 \x01(\tR\bleaderId\x12$\n" +
+	"\x0eprev_log_index\x18\x03 \x01(\x03R\fprevLogIndex\x12\"\n" +
+	"\rprev_log_term\x18\x04 \x01(\x03R\vprevLogTerm\x12*\n" +
+	"\aentries\x18\x05 \x03(\v2\x10.ingest.LogEntryR\aentries\x12#\n" +
+	"\rleader_commit\x18\x06 \x01(\x03R\fleaderCommit\"\x91\x01\n" +
 	"\x15AppendEntriesResponse\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x03R\x04term\x12\x18\n" +
-	"\asuccess\x18\x02 \x01(\bR\asuccess2K\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\x12%\n" +
+	"\x0econflict_index\x18\x03 \x01(\x03R\rconflictIndex\x12#\n" +
+	"\rconflict_term\x18\x04 \x01(\x03R\fconflictTerm2K\n" +
 	"\x10IngestionService\x127\n" +
 	"\x06Ingest\x12\x15.ingest.IngestRequest\x1a\x16.ingest.IngestResponse2O\n" +
 	"\x12ReplicationService\x129\n" +
@@ -637,68 +757,70 @@ const file_proto_ingest_proto_rawDesc = "" +
 	"\rAppendEntries\x12\x1c.ingest.AppendEntriesRequest\x1a\x1d.ingest.AppendEntriesResponseB%Z#github.com/junyoung/core-x/proto/pbb\x06proto3"
 
 var (
-	file_proto_ingest_proto_rawDescOnce sync.Once
-	file_proto_ingest_proto_rawDescData []byte
+	file_ingest_proto_rawDescOnce sync.Once
+	file_ingest_proto_rawDescData []byte
 )
 
-func file_proto_ingest_proto_rawDescGZIP() []byte {
-	file_proto_ingest_proto_rawDescOnce.Do(func() {
-		file_proto_ingest_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_ingest_proto_rawDesc), len(file_proto_ingest_proto_rawDesc)))
+func file_ingest_proto_rawDescGZIP() []byte {
+	file_ingest_proto_rawDescOnce.Do(func() {
+		file_ingest_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_ingest_proto_rawDesc), len(file_ingest_proto_rawDesc)))
 	})
-	return file_proto_ingest_proto_rawDescData
+	return file_ingest_proto_rawDescData
 }
 
-var file_proto_ingest_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
-var file_proto_ingest_proto_goTypes = []any{
+var file_ingest_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_ingest_proto_goTypes = []any{
 	(*IngestRequest)(nil),         // 0: ingest.IngestRequest
 	(*IngestResponse)(nil),        // 1: ingest.IngestResponse
 	(*StreamWALRequest)(nil),      // 2: ingest.StreamWALRequest
 	(*WALEntry)(nil),              // 3: ingest.WALEntry
 	(*GetRequest)(nil),            // 4: ingest.GetRequest
 	(*GetResponse)(nil),           // 5: ingest.GetResponse
-	(*RequestVoteRequest)(nil),    // 6: ingest.RequestVoteRequest
-	(*RequestVoteResponse)(nil),   // 7: ingest.RequestVoteResponse
-	(*AppendEntriesRequest)(nil),  // 8: ingest.AppendEntriesRequest
-	(*AppendEntriesResponse)(nil), // 9: ingest.AppendEntriesResponse
+	(*LogEntry)(nil),              // 6: ingest.LogEntry
+	(*RequestVoteRequest)(nil),    // 7: ingest.RequestVoteRequest
+	(*RequestVoteResponse)(nil),   // 8: ingest.RequestVoteResponse
+	(*AppendEntriesRequest)(nil),  // 9: ingest.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil), // 10: ingest.AppendEntriesResponse
 }
-var file_proto_ingest_proto_depIdxs = []int32{
-	0, // 0: ingest.IngestionService.Ingest:input_type -> ingest.IngestRequest
-	2, // 1: ingest.ReplicationService.StreamWAL:input_type -> ingest.StreamWALRequest
-	4, // 2: ingest.KVService.Get:input_type -> ingest.GetRequest
-	6, // 3: ingest.RaftService.RequestVote:input_type -> ingest.RequestVoteRequest
-	8, // 4: ingest.RaftService.AppendEntries:input_type -> ingest.AppendEntriesRequest
-	1, // 5: ingest.IngestionService.Ingest:output_type -> ingest.IngestResponse
-	3, // 6: ingest.ReplicationService.StreamWAL:output_type -> ingest.WALEntry
-	5, // 7: ingest.KVService.Get:output_type -> ingest.GetResponse
-	7, // 8: ingest.RaftService.RequestVote:output_type -> ingest.RequestVoteResponse
-	9, // 9: ingest.RaftService.AppendEntries:output_type -> ingest.AppendEntriesResponse
-	5, // [5:10] is the sub-list for method output_type
-	0, // [0:5] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+var file_ingest_proto_depIdxs = []int32{
+	6,  // 0: ingest.AppendEntriesRequest.entries:type_name -> ingest.LogEntry
+	0,  // 1: ingest.IngestionService.Ingest:input_type -> ingest.IngestRequest
+	2,  // 2: ingest.ReplicationService.StreamWAL:input_type -> ingest.StreamWALRequest
+	4,  // 3: ingest.KVService.Get:input_type -> ingest.GetRequest
+	7,  // 4: ingest.RaftService.RequestVote:input_type -> ingest.RequestVoteRequest
+	9,  // 5: ingest.RaftService.AppendEntries:input_type -> ingest.AppendEntriesRequest
+	1,  // 6: ingest.IngestionService.Ingest:output_type -> ingest.IngestResponse
+	3,  // 7: ingest.ReplicationService.StreamWAL:output_type -> ingest.WALEntry
+	5,  // 8: ingest.KVService.Get:output_type -> ingest.GetResponse
+	8,  // 9: ingest.RaftService.RequestVote:output_type -> ingest.RequestVoteResponse
+	10, // 10: ingest.RaftService.AppendEntries:output_type -> ingest.AppendEntriesResponse
+	6,  // [6:11] is the sub-list for method output_type
+	1,  // [1:6] is the sub-list for method input_type
+	1,  // [1:1] is the sub-list for extension type_name
+	1,  // [1:1] is the sub-list for extension extendee
+	0,  // [0:1] is the sub-list for field type_name
 }
 
-func init() { file_proto_ingest_proto_init() }
-func file_proto_ingest_proto_init() {
-	if File_proto_ingest_proto != nil {
+func init() { file_ingest_proto_init() }
+func file_ingest_proto_init() {
+	if File_ingest_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_ingest_proto_rawDesc), len(file_proto_ingest_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ingest_proto_rawDesc), len(file_ingest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   4,
 		},
-		GoTypes:           file_proto_ingest_proto_goTypes,
-		DependencyIndexes: file_proto_ingest_proto_depIdxs,
-		MessageInfos:      file_proto_ingest_proto_msgTypes,
+		GoTypes:           file_ingest_proto_goTypes,
+		DependencyIndexes: file_ingest_proto_depIdxs,
+		MessageInfos:      file_ingest_proto_msgTypes,
 	}.Build()
-	File_proto_ingest_proto = out.File
-	file_proto_ingest_proto_goTypes = nil
-	file_proto_ingest_proto_depIdxs = nil
+	File_ingest_proto = out.File
+	file_ingest_proto_goTypes = nil
+	file_ingest_proto_depIdxs = nil
 }

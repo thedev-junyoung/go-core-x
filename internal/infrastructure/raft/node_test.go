@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/junyoung/core-x/internal/infrastructure/raft"
+	pb "github.com/junyoung/core-x/proto/pb"
 )
 
 func TestRaftRoleString(t *testing.T) {
@@ -40,12 +41,12 @@ func TestRaftNode_StartsAsFollower(t *testing.T) {
 func TestRaftNode_HandleAppendEntries_HigherTerm_UpdatesTerm(t *testing.T) {
 	node := raft.NewRaftNode("node-1", nil, nil)
 
-	term, success := node.HandleAppendEntries(5, "node-2")
-	if !success {
+	res := node.HandleAppendEntries(raft.AppendEntriesArgs{Term: 5, LeaderID: "node-2"})
+	if !res.Success {
 		t.Error("expected success=true")
 	}
-	if term != 5 {
-		t.Errorf("expected returned term=5, got %d", term)
+	if res.Term != 5 {
+		t.Errorf("expected returned term=5, got %d", res.Term)
 	}
 	if got := node.Term(); got != 5 {
 		t.Errorf("expected node term=5, got %d", got)
@@ -57,14 +58,14 @@ func TestRaftNode_HandleAppendEntries_HigherTerm_UpdatesTerm(t *testing.T) {
 
 func TestRaftNode_HandleAppendEntries_LowerTerm_Rejected(t *testing.T) {
 	node := raft.NewRaftNode("node-1", nil, nil)
-	node.HandleAppendEntries(10, "node-2") // advance term to 10
+	node.HandleAppendEntries(raft.AppendEntriesArgs{Term: 10, LeaderID: "node-2"}) // advance term to 10
 
-	term, success := node.HandleAppendEntries(5, "node-3") // stale leader
-	if success {
+	res := node.HandleAppendEntries(raft.AppendEntriesArgs{Term: 5, LeaderID: "node-3"}) // stale leader
+	if res.Success {
 		t.Error("expected success=false for stale term")
 	}
-	if term != 10 {
-		t.Errorf("expected current term 10 in response, got %d", term)
+	if res.Term != 10 {
+		t.Errorf("expected current term 10 in response, got %d", res.Term)
 	}
 }
 
@@ -187,8 +188,8 @@ func TestRaftNode_HandleAppendEntries_ResetsToFollower_WhenLeader(t *testing.T) 
 	}
 
 	// Higher-term AppendEntries should demote to Follower.
-	_, success := node.HandleAppendEntries(4, "node-3")
-	if !success {
+	res := node.HandleAppendEntries(raft.AppendEntriesArgs{Term: 4, LeaderID: "node-3"})
+	if !res.Success {
 		t.Error("expected success=true")
 	}
 	if got := node.Role(); got != raft.RoleFollower {
@@ -293,7 +294,7 @@ func TestRaftNode_Meta_PersistsTermOnAppendEntries(t *testing.T) {
 	meta := raft.NewMemMetaStore()
 	node := raft.NewRaftNode("node-1", nil, meta)
 
-	node.HandleAppendEntries(7, "leader-1")
+	node.HandleAppendEntries(raft.AppendEntriesArgs{Term: 7, LeaderID: "leader-1"})
 
 	saved, _ := meta.Load()
 	if saved.Term != 7 {
@@ -343,5 +344,202 @@ func TestRaftNode_Meta_RestoredOnRestart(t *testing.T) {
 	_, granted := node2.HandleRequestVote(3, "node-3", 0, 0)
 	if granted {
 		t.Error("expected vote denied: already voted for node-2 in term 3")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// §5.3 Log Matching Property tests
+// ---------------------------------------------------------------------------
+
+// makeEntry is a test helper that constructs a pb.LogEntry.
+func makeEntry(index, term int64, data string) *pb.LogEntry {
+	return &pb.LogEntry{Index: index, Term: term, Data: []byte(data)}
+}
+
+// aeArgs is a test helper to build AppendEntriesArgs with sensible defaults.
+func aeArgs(term int64, leaderID string, prevIdx, prevTerm int64, entries []*pb.LogEntry, leaderCommit int64) raft.AppendEntriesArgs {
+	return raft.AppendEntriesArgs{
+		Term:         term,
+		LeaderID:     leaderID,
+		PrevLogIndex: prevIdx,
+		PrevLogTerm:  prevTerm,
+		Entries:      entries,
+		LeaderCommit: leaderCommit,
+	}
+}
+
+// TestAppendEntries_Heartbeat_NoEntries verifies that an empty AppendEntries
+// (heartbeat) is accepted and resets the follower without touching the log.
+func TestAppendEntries_Heartbeat_NoEntries(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil)
+	node.ForceRole(raft.RoleCandidate, 2)
+
+	res := node.HandleAppendEntries(aeArgs(2, "leader", 0, 0, nil, 0))
+	if !res.Success {
+		t.Fatal("heartbeat should succeed")
+	}
+	if node.Role() != raft.RoleFollower {
+		t.Error("expected follower after heartbeat")
+	}
+	if node.LogLen() != 0 {
+		t.Errorf("expected empty log, got %d entries", node.LogLen())
+	}
+}
+
+// TestAppendEntries_AppendNewEntries verifies that new entries are appended
+// when prevLogIndex is consistent (base case: appending to empty log).
+func TestAppendEntries_AppendNewEntries(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil)
+
+	entries := []*pb.LogEntry{
+		makeEntry(1, 1, "cmd-a"),
+		makeEntry(2, 1, "cmd-b"),
+	}
+	res := node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, entries, 0))
+	if !res.Success {
+		t.Fatalf("expected success, got failure (conflictIndex=%d conflictTerm=%d)", res.ConflictIndex, res.ConflictTerm)
+	}
+	if got := node.LogLen(); got != 2 {
+		t.Errorf("expected 2 log entries, got %d", got)
+	}
+}
+
+// TestAppendEntries_PrevLogIndex_Miss_ReturnsConflictIndex verifies that when
+// the follower lacks the entry at prevLogIndex, it returns the length of its
+// log as conflictIndex so the leader can jump forward (Fast Backup §5.3).
+func TestAppendEntries_PrevLogIndex_Miss_ReturnsConflictIndex(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil)
+	// Node has only entry at index 1, term 1.
+	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{makeEntry(1, 1, "a")}, 0))
+
+	// Leader thinks peer has up to index 3; prevLogIndex=3 does not exist.
+	res := node.HandleAppendEntries(aeArgs(1, "leader", 3, 1, nil, 0))
+	if res.Success {
+		t.Fatal("expected failure: prevLogIndex=3 not in log")
+	}
+	// conflictIndex should be 2 (lastLogIndex+1 = 1+1).
+	if res.ConflictIndex != 2 {
+		t.Errorf("expected conflictIndex=2, got %d", res.ConflictIndex)
+	}
+	if res.ConflictTerm != 0 {
+		t.Errorf("expected conflictTerm=0 (no entry), got %d", res.ConflictTerm)
+	}
+}
+
+// TestAppendEntries_PrevLogTerm_Mismatch_ReturnsConflictTerm verifies that
+// when the entry at prevLogIndex exists but has the wrong term, the follower
+// returns the conflicting term and its first index (Fast Backup).
+func TestAppendEntries_PrevLogTerm_Mismatch_ReturnsConflictTerm(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil)
+	// Build log: [1:t1, 2:t1, 3:t1] — all in term 1.
+	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{
+		makeEntry(1, 1, "a"),
+		makeEntry(2, 1, "b"),
+		makeEntry(3, 1, "c"),
+	}, 0))
+
+	// Leader sends with prevLogIndex=3, prevLogTerm=2 (mismatch: we have term 1).
+	res := node.HandleAppendEntries(aeArgs(2, "leader", 3, 2, nil, 0))
+	if res.Success {
+		t.Fatal("expected failure: prevLogTerm mismatch")
+	}
+	if res.ConflictTerm != 1 {
+		t.Errorf("expected conflictTerm=1, got %d", res.ConflictTerm)
+	}
+	// conflictIndex should be 1 (first index with term 1).
+	if res.ConflictIndex != 1 {
+		t.Errorf("expected conflictIndex=1, got %d", res.ConflictIndex)
+	}
+}
+
+// TestAppendEntries_ConflictTruncation verifies that conflicting entries are
+// deleted and new entries replace them (§5.3: "delete the existing entry and
+// all that follow it").
+func TestAppendEntries_ConflictTruncation(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil)
+	// Start with log [1:t1, 2:t1, 3:t1].
+	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{
+		makeEntry(1, 1, "a"),
+		makeEntry(2, 1, "b"),
+		makeEntry(3, 1, "c"),
+	}, 0))
+
+	// Leader (term 2) sends [3:t2, 4:t2] starting at prevLogIndex=2.
+	// Entry 3 in our log has term 1 — conflict → truncate [3:t1], replace with [3:t2, 4:t2].
+	res := node.HandleAppendEntries(aeArgs(2, "leader", 2, 1, []*pb.LogEntry{
+		makeEntry(3, 2, "c-new"),
+		makeEntry(4, 2, "d"),
+	}, 0))
+	if !res.Success {
+		t.Fatalf("expected success after truncation, got failure (conflictIndex=%d conflictTerm=%d)", res.ConflictIndex, res.ConflictTerm)
+	}
+	if got := node.LogLen(); got != 4 {
+		t.Errorf("expected 4 log entries after replace, got %d", got)
+	}
+}
+
+// TestAppendEntries_IdempotentReplay verifies that replaying the same entries
+// does not duplicate them (§5.3 Log Matching: if index+term match, same command).
+func TestAppendEntries_IdempotentReplay(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil)
+	entries := []*pb.LogEntry{makeEntry(1, 1, "a"), makeEntry(2, 1, "b")}
+	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, entries, 0))
+	// Replay the same entries.
+	res := node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, entries, 0))
+	if !res.Success {
+		t.Fatal("replay should succeed")
+	}
+	if got := node.LogLen(); got != 2 {
+		t.Errorf("idempotent replay: expected 2 entries, got %d", got)
+	}
+}
+
+// TestAppendEntries_CommitIndex_AdvancesOnLeaderCommit verifies that the
+// follower advances its commitIndex to min(leaderCommit, lastNewIndex).
+func TestAppendEntries_CommitIndex_AdvancesOnLeaderCommit(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil)
+	// Append 3 entries.
+	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{
+		makeEntry(1, 1, "a"),
+		makeEntry(2, 1, "b"),
+		makeEntry(3, 1, "c"),
+	}, 0))
+
+	// Leader commits up to index 2.
+	res := node.HandleAppendEntries(aeArgs(1, "leader", 3, 1, nil, 2))
+	if !res.Success {
+		t.Fatal("expected success")
+	}
+	if got := node.CommitIndex(); got != 2 {
+		t.Errorf("expected commitIndex=2, got %d", got)
+	}
+}
+
+// TestAppendEntries_CommitIndex_ClampedToLastNewIndex verifies that commitIndex
+// does not exceed the last new entry index even if leaderCommit is higher.
+func TestAppendEntries_CommitIndex_ClampedToLastNewIndex(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil)
+	// Append only 2 entries; leader claims commit at 5.
+	node.HandleAppendEntries(aeArgs(1, "leader", 0, 0, []*pb.LogEntry{
+		makeEntry(1, 1, "a"),
+		makeEntry(2, 1, "b"),
+	}, 5))
+	if got := node.CommitIndex(); got != 2 {
+		t.Errorf("expected commitIndex clamped to 2 (lastNewIndex), got %d", got)
+	}
+}
+
+// TestAppendEntries_StaleLeader_Rejected verifies that AppendEntries from a
+// stale leader (lower term) is rejected, per §5.1.
+func TestAppendEntries_StaleLeader_Rejected(t *testing.T) {
+	node := raft.NewRaftNode("node-1", nil, nil)
+	node.HandleAppendEntries(aeArgs(5, "leader-a", 0, 0, nil, 0)) // advance to term 5
+
+	res := node.HandleAppendEntries(aeArgs(3, "leader-old", 0, 0, nil, 0))
+	if res.Success {
+		t.Error("expected rejection for stale-term leader")
+	}
+	if res.Term != 5 {
+		t.Errorf("expected response term=5, got %d", res.Term)
 	}
 }
