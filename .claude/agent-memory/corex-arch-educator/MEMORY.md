@@ -1,0 +1,2 @@
+- [User Profile](user_profile.md) — Go 백엔드 개발자, Core-X 분산 KV 스토어 설계/학습 목적으로 구축
+- [Phase Architecture](project_phase_architecture.md) — Core-X Phase 1~5 진행 상황 및 ADR 매핑
