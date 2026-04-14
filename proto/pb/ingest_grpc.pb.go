@@ -344,8 +344,9 @@ var KVService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	RaftService_RequestVote_FullMethodName   = "/ingest.RaftService/RequestVote"
-	RaftService_AppendEntries_FullMethodName = "/ingest.RaftService/AppendEntries"
+	RaftService_RequestVote_FullMethodName     = "/ingest.RaftService/RequestVote"
+	RaftService_AppendEntries_FullMethodName   = "/ingest.RaftService/AppendEntries"
+	RaftService_InstallSnapshot_FullMethodName = "/ingest.RaftService/InstallSnapshot"
 )
 
 // RaftServiceClient is the client API for RaftService service.
@@ -354,11 +355,14 @@ const (
 //
 // RaftService implements Phase 5a leader election RPCs.
 // Phase 5b extends AppendEntries with log entries (§5.3 Log Matching).
+// Phase 9b adds InstallSnapshot for lagging follower recovery (§7).
 type RaftServiceClient interface {
 	// RequestVote is sent by a Candidate to collect votes.
 	RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error)
 	// AppendEntries is sent by the Leader for heartbeats and log replication (§5.3).
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
+	// InstallSnapshot transfers a snapshot from the Leader to a lagging Follower (§7).
+	InstallSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[InstallSnapshotRequest, InstallSnapshotResponse], error)
 }
 
 type raftServiceClient struct {
@@ -389,17 +393,33 @@ func (c *raftServiceClient) AppendEntries(ctx context.Context, in *AppendEntries
 	return out, nil
 }
 
+func (c *raftServiceClient) InstallSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[InstallSnapshotRequest, InstallSnapshotResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RaftService_ServiceDesc.Streams[0], RaftService_InstallSnapshot_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[InstallSnapshotRequest, InstallSnapshotResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RaftService_InstallSnapshotClient = grpc.ClientStreamingClient[InstallSnapshotRequest, InstallSnapshotResponse]
+
 // RaftServiceServer is the server API for RaftService service.
 // All implementations must embed UnimplementedRaftServiceServer
 // for forward compatibility.
 //
 // RaftService implements Phase 5a leader election RPCs.
 // Phase 5b extends AppendEntries with log entries (§5.3 Log Matching).
+// Phase 9b adds InstallSnapshot for lagging follower recovery (§7).
 type RaftServiceServer interface {
 	// RequestVote is sent by a Candidate to collect votes.
 	RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error)
 	// AppendEntries is sent by the Leader for heartbeats and log replication (§5.3).
 	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
+	// InstallSnapshot transfers a snapshot from the Leader to a lagging Follower (§7).
+	InstallSnapshot(grpc.ClientStreamingServer[InstallSnapshotRequest, InstallSnapshotResponse]) error
 	mustEmbedUnimplementedRaftServiceServer()
 }
 
@@ -415,6 +435,9 @@ func (UnimplementedRaftServiceServer) RequestVote(context.Context, *RequestVoteR
 }
 func (UnimplementedRaftServiceServer) AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AppendEntries not implemented")
+}
+func (UnimplementedRaftServiceServer) InstallSnapshot(grpc.ClientStreamingServer[InstallSnapshotRequest, InstallSnapshotResponse]) error {
+	return status.Error(codes.Unimplemented, "method InstallSnapshot not implemented")
 }
 func (UnimplementedRaftServiceServer) mustEmbedUnimplementedRaftServiceServer() {}
 func (UnimplementedRaftServiceServer) testEmbeddedByValue()                     {}
@@ -473,6 +496,13 @@ func _RaftService_AppendEntries_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftService_InstallSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(RaftServiceServer).InstallSnapshot(&grpc.GenericServerStream[InstallSnapshotRequest, InstallSnapshotResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RaftService_InstallSnapshotServer = grpc.ClientStreamingServer[InstallSnapshotRequest, InstallSnapshotResponse]
+
 // RaftService_ServiceDesc is the grpc.ServiceDesc for RaftService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -489,6 +519,12 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RaftService_AppendEntries_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "InstallSnapshot",
+			Handler:       _RaftService_InstallSnapshot_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "ingest.proto",
 }

@@ -1,7 +1,8 @@
 # ADR-017: Raft Log Compaction — Snapshot Mechanism
 
-**상태**: Proposed
+**상태**: Accepted
 **날짜**: 2026-04-14
+**검토**: 2026-04-14 (core-x-principal-architect 아키텍처 검토 반영)
 **관련**: [ADR-016](016-raft-kv-durability.md), [ADR-012](012-raft-log-wal-persistence.md), [ADR-006](0006-wal-compaction.md)
 
 ---
@@ -90,10 +91,12 @@ const DefaultSnapshotCheckInterval = 5 * time.Minute
 ### 트리거 조건 공식
 
 ```
-should_snapshot = (commitIndex - snapshotIndex) >= SnapshotThreshold
+should_snapshot = (lastApplied - snapshotIndex) >= SnapshotThreshold
                   AND role == Leader  // 리더만 자발적으로 스냅샷을 시작한다
                   AND !snapshotInProgress  // 동시 스냅샷 방지
 ```
+
+> **왜 `commitIndex`가 아닌 `lastApplied`인가**: 스냅샷의 `capturedIndex`는 `lastApplied`(상태 머신이 실제로 적용한 인덱스)를 기준으로 한다. `commitIndex > lastApplied`인 순간은 항상 존재하므로 트리거를 `commitIndex`로 평가하면 `capturedTerm = log[capturedIndex].Term` 조회 시 이미 compacted된 인덱스에 접근하는 경우가 발생한다.
 
 **팔로워 스냅샷 제외 이유**: 팔로워는 리더로부터 `InstallSnapshot` RPC를 받는 수동적 경로를 통해서만 스냅샷 상태를 획득한다. 팔로워가 독립적으로 스냅샷을 생성하면 스냅샷 인덱스/텀 정보가 리더와 달라질 수 있으며, 이는 §7의 안전 조건을 위반한다.
 
@@ -171,12 +174,18 @@ Step 3: snapshotIndex 캡처
   capturedIndex = lastApplied.Load()
   capturedTerm  = log[capturedIndex].Term  (n.mu 하에서 조회)
 
-Step 4: sm.data 얕은 복사 (뮤텍스 최소 보유)
+Step 4: sm.mu.RLock() 하에서 lastApplied와 sm.data를 동시에 캡처 (COW correctness)
   sm.mu.RLock()
+  capturedIndex = sm.lastApplied.Load()  // ← n.mu에서 읽은 값과 동일해야 함
   snapshot := make(map[string]string, len(sm.data))
   for k, v := range sm.data { snapshot[k] = v }
   sm.mu.RUnlock()
   // 이후 sm.data는 자유롭게 변경 가능
+
+  // 주의: capturedIndex와 sm.data를 같은 sm.mu.RLock 컨텍스트에서 캡처해야
+  // "인덱스 N까지의 상태를 정확히 담은 스냅샷"이 보장된다.
+  // Step 3에서 n.mu로 읽은 capturedIndex와 여기서 읽은 sm.lastApplied가
+  // 다를 경우(apply loop가 앞섰을 때)는 스냅샷을 중단하거나 새 값을 사용한다.
 
 Step 5: 별도 고루틴에서 스냅샷 파일 기록
   go func() {
@@ -398,15 +407,27 @@ HandleInstallSnapshot (follower-side):
 **중요 안전 조건 (§7)**: 팔로워가 스냅샷을 적용하기 전에 자신의 로그에 스냅샷 인덱스/텀과 일치하는 엔트리가 있으면, 그 이후 로그를 보존해야 한다 (더 최신 정보가 있을 수 있음). 기본 구현에서는 단순화를 위해 항상 스냅샷을 덮어쓴다.
 
 ```go
-// §7 최적화 (Phase 9에서 구현, 단순화 버전)
-// 팔로워 로그에 이미 snapshotIndex 이후 엔트리가 있으면 prefix만 삭제
-if n.lastLogIndex() > req.LastIncludedIndex {
-    n.truncateLogPrefix(req.LastIncludedIndex)
+// §7 최적화 (Phase 9에서 구현)
+// 팔로워 로그에 스냅샷 인덱스/텀과 일치하는 엔트리가 있고,
+// 해당 인덱스까지 이미 apply된 경우에만 prefix 삭제로 최적화한다.
+//
+// 안전 조건 3가지를 모두 만족해야 한다:
+//   1. 로그에 req.LastIncludedIndex 엔트리가 존재
+//   2. 해당 엔트리의 Term이 req.LastIncludedTerm과 일치 (Log Matching Property)
+//   3. sm.lastApplied >= req.LastIncludedIndex (해당 인덱스까지 실제 apply됨)
+entry, ok := n.entryAt(req.LastIncludedIndex)
+if ok && entry.Term == req.LastIncludedTerm &&
+    sm.lastApplied.Load() >= req.LastIncludedIndex {
+    n.truncateLogPrefix(req.LastIncludedIndex, req.LastIncludedTerm)
     // sm.data는 유지 — 이미 최신 상태
     return
 }
 // 그렇지 않으면 전체 스냅샷 적용
 ```
+
+> **조건 2 (Term 일치) 추가 이유**: 인덱스만 비교하면 서로 다른 term의 동일 인덱스를 가진 엔트리를 허용하게 되어 Log Matching Property를 위반한다. 팔로워가 term이 다른 엔트리를 가지고 있다면 전체 스냅샷 적용이 안전하다.
+>
+> **조건 3 (lastApplied) 추가 이유**: 로그에 엔트리가 있어도 아직 apply되지 않았으면 sm.data가 해당 인덱스까지의 상태를 반영하지 않는다. sm.data를 유지하면 apply되지 않은 변경이 누락된다.
 
 ---
 
@@ -508,7 +529,9 @@ type Snapshotable interface {
     // 이후 상태 변경에 영향을 받지 않는다 (COW 보장).
     //
     // lastApplied: 스냅샷이 커버하는 마지막 Raft 인덱스
-    TakeSnapshot() (data SnapshotData, lastApplied int64, lastTerm int64, err error)
+    // lastTerm은 반환하지 않는다 — term은 Raft 레이어의 메타데이터이므로
+    // 호출자(RaftNode)가 entryAt(lastApplied).Term으로 직접 조회한다.
+    TakeSnapshot() (data SnapshotData, lastApplied int64, err error)
 
     // RestoreSnapshot은 스냅샷 데이터로 상태를 완전히 교체한다.
     //
@@ -587,6 +610,25 @@ type LogStore interface {
 }
 ```
 
+### lastEntry() 수정 — snapshotIndex Fallback 필수
+
+스냅샷 도입 후 `n.log`는 `snapshotIndex + 1`부터 시작하는 슬라이스가 된다. 로그가 비어 있을 때(`len(n.log) == 0`) `lastEntry()`가 `(0, 0)`을 반환하면 §5.4.1 `candidateLogUpToDate` 판정이 깨진다 — 이 노드는 index 0, term 0을 가진 것으로 취급되어 모든 candidate가 더 up-to-date하다고 판정된다.
+
+```go
+// lastEntry returns the index and term of the last log entry.
+// After compaction, falls back to snapshotIndex/snapshotTerm (§5.4.1).
+// Must be called with mu held.
+func (n *RaftNode) lastEntry() (index, term int64) {
+    if len(n.log) == 0 {
+        return n.snapshotIndex, n.snapshotTerm
+    }
+    e := n.log[len(n.log)-1]
+    return e.Index, e.Term
+}
+```
+
+이 변경은 `candidateLogUpToDate`, `sendHeartbeats`의 `prevLogIndex/prevLogTerm`, `maybeAdvanceCommitIndex` 계산에 전파 효과가 있다 — 모두 `lastEntry()`를 호출하므로 자동으로 올바른 fallback을 사용하게 된다.
+
 ### RaftNode 확장
 
 ```go
@@ -623,15 +665,24 @@ Step 1: 스냅샷 스토어 초기화
   snapshotStore.Latest() → 최신 스냅샷 메타 확인
   if exists:
     snapshotStore.Load(meta.Index) → CRC32 검증
-    if CRC32 OK: sm.RestoreSnapshot(data)  → sm.data 복원
-                 sm.lastApplied = meta.Index
-                 n.snapshotIndex = meta.Index
+    if CRC32 OK: sm.RestoreSnapshot(data, meta.Index)  → sm.data + sm.lastApplied 복원
+                 n.snapshotIndex = meta.Index  // ← WAL 필터링의 전제 조건
                  n.snapshotTerm  = meta.Term
     if CRC32 fail: 이전 스냅샷 시도 (최대 retainCount만큼)
 
 Step 2: Raft WAL 로드 (ADR-012)
   logStore.LoadAll() → entries
-  entries = entries[snapshotIndex:]  // 스냅샷 이전 엔트리 skip
+  // snapshotIndex 이하 엔트리 필터링 (slice가 아닌 filter — panic 방지)
+  // WAL compaction 완료 시: entries에 구 엔트리가 없음
+  // 크래시 시나리오 C: entries에 구 엔트리가 아직 있을 수 있음
+  // 양쪽 모두 안전하게 처리:
+  filtered := entries[:0]
+  for _, e := range entries {
+      if e.Index > n.snapshotIndex {
+          filtered = append(filtered, e)
+      }
+  }
+  entries = filtered
 
 Step 3: KV WAL 복원 (ADR-016)
   sm.store.RecoverKV() → bitcaskLastApplied

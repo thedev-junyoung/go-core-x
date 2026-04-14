@@ -276,6 +276,42 @@ func (sm *KVStateMachine) WaitForIndex(ctx context.Context, index int64) error {
 	}
 }
 
+// TakeSnapshot implements Snapshotable.
+//
+// COW correctness: sm.mu.RLock() is held for the entire duration so that
+// sm.data and sm.lastApplied are captured as a consistent pair. Any
+// concurrent apply() call blocks until RUnlock(). Mutations after RUnlock
+// cannot affect the returned SnapshotData because snapshot is a fresh map.
+func (sm *KVStateMachine) TakeSnapshot() (SnapshotData, int64, error) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	// Capture lastApplied and data under the same read lock (INV-S1 consistency).
+	capturedIndex := sm.lastApplied.Load()
+	snapshot := make(map[string]string, len(sm.data))
+	for k, v := range sm.data {
+		snapshot[k] = v
+	}
+	return SnapshotData{KV: snapshot}, capturedIndex, nil
+}
+
+// RestoreSnapshot implements Snapshotable.
+//
+// Replaces sm.data atomically under a write lock and updates lastApplied.
+// Called either during startup (before Run()) or by InstallSnapshot (Phase 9b).
+// Concurrent apply() calls are excluded by sm.mu.Lock().
+func (sm *KVStateMachine) RestoreSnapshot(data SnapshotData, lastApplied int64) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.data = make(map[string]string, len(data.KV))
+	for k, v := range data.KV {
+		sm.data[k] = v
+	}
+	sm.lastApplied.Store(lastApplied)
+	return nil
+}
+
 func (sm *KVStateMachine) notifyWaiters(index int64) {
 	sm.waitMu.Lock()
 	waiters := sm.waiters[index]
