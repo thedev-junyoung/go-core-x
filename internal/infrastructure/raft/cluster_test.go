@@ -63,7 +63,7 @@ func startCluster(t *testing.T, count int) []*testClusterNode {
 		go grpcSrv.Serve(listeners[i]) //nolint:errcheck
 
 		ctx, cancel := context.WithCancel(context.Background())
-		sm := NewKVStateMachine()
+		sm := NewKVStateMachine(nil)
 		go raftNode.Run(ctx)
 		go sm.Run(ctx, raftNode.ApplyCh())
 
