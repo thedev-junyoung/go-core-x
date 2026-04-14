@@ -26,6 +26,10 @@ func (f *fakeNode) HandleRequestVote(term int64, candidateID string, lastLogInde
 	return f.currentTerm, f.grantVote
 }
 
+func (f *fakeNode) HandleInstallSnapshot(req raft.InstallSnapshotArgs) raft.InstallSnapshotResult {
+	return raft.InstallSnapshotResult{Term: f.currentTerm}
+}
+
 func TestRaftServer_AppendEntries(t *testing.T) {
 	node := &fakeNode{currentTerm: 1}
 	srv := raft.NewRaftServer(node)

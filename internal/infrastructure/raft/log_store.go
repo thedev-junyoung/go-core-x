@@ -34,6 +34,11 @@ type LogStore interface {
 	// Called once at startup for log recovery.
 	LoadAll() ([]LogEntry, error)
 
+	// CompactPrefix removes all entries with Index <= upToIndex from stable storage.
+	// Must be called AFTER the corresponding snapshot has been durably saved
+	// (INV-S3: snapshot durability precedes log compaction).
+	CompactPrefix(upToIndex int64) error
+
 	// Close releases underlying resources.
 	Close() error
 }
@@ -137,6 +142,144 @@ func (s *WALLogStore) LoadAll() ([]LogEntry, error) {
 	return entries, nil
 }
 
+// CompactPrefix rewrites the WAL retaining only entries with Index > upToIndex.
+//
+// Procedure:
+//  1. rewriteWALExcluding writes qualifying entries to a .compact.tmp file.
+//  2. RunExclusiveSwap atomically swaps the Writer's file handle to the new file
+//     and renames the tmp file to the active WAL path.
+//
+// Crash safety:
+//   - Before rename: original WAL is untouched.
+//   - After rename: the compacted WAL is in place; startup LoadAll() replays it.
+//   - On crash between rename and swap: the next CompactPrefix call removes the
+//     .compact.tmp leftover (rewriteWALExcluding truncates then rewrites).
+//
+// INV-S3: caller must ensure Save() on SnapshotStore has completed before
+// calling CompactPrefix, so that the snapshot covers all removed entries.
+func (s *WALLogStore) CompactPrefix(upToIndex int64) error {
+	tmpPath := s.path + ".compact.tmp"
+
+	return s.w.RunExclusiveSwap(func() (*os.File, int64, error) {
+		newFile, newSize, err := rewriteWALExcluding(s.path, tmpPath, upToIndex)
+		if err != nil {
+			_ = os.Remove(tmpPath)
+			return nil, 0, fmt.Errorf("raft log store: compact prefix up_to=%d: %w", upToIndex, err)
+		}
+
+		if err := os.Rename(tmpPath, s.path); err != nil {
+			_ = newFile.Close()
+			_ = os.Remove(tmpPath)
+			return nil, 0, fmt.Errorf("raft log store: compact prefix rename: %w", err)
+		}
+
+		return newFile, newSize, nil
+	})
+}
+
+// rewriteWALExcluding reads srcPath and writes all entries with Index > upToIndex
+// to dstPath (as a new WAL). Returns the opened write-mode file handle and its size.
+//
+// If srcPath does not exist (first startup or already compacted), an empty WAL
+// is created at dstPath — this is safe and correct.
+//
+// The returned file is opened O_APPEND|O_WRONLY; the caller (RunExclusiveSwap)
+// uses it as the new active writer file.
+func rewriteWALExcluding(srcPath, dstPath string, upToIndex int64) (*os.File, int64, error) {
+	// Remove leftover from a previous failed attempt.
+	_ = os.Remove(dstPath)
+
+	// Collect qualifying entries from srcPath.
+	var toKeep []LogEntry
+	r, err := walstore.NewReader(srcPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, 0, fmt.Errorf("open src WAL %s: %w", srcPath, err)
+		}
+		// srcPath doesn't exist — nothing to compact; write empty WAL.
+	} else {
+		defer r.Close()
+		// Replay identical logic to LoadAll to reconstruct the effective log.
+		var entries []LogEntry
+		for r.Scan() {
+			data := r.Record().Data
+			if len(data) == 0 {
+				continue
+			}
+			switch data[0] {
+			case logRecordTypeEntry:
+				e, err := decodeLogEntry(data[1:])
+				if err != nil {
+					return nil, 0, fmt.Errorf("decode log entry: %w", err)
+				}
+				entries = append(entries, e)
+			case logRecordTypeTruncate:
+				fromIndex, err := decodeTruncate(data[1:])
+				if err != nil {
+					return nil, 0, fmt.Errorf("decode truncate: %w", err)
+				}
+				cutAt := 0
+				for cutAt < len(entries) && entries[cutAt].Index < fromIndex {
+					cutAt++
+				}
+				entries = entries[:cutAt]
+			}
+		}
+		if scanErr := r.Err(); scanErr != nil && scanErr != walstore.ErrTruncated {
+			return nil, 0, fmt.Errorf("scan src WAL: %w", scanErr)
+		}
+
+		// Filter: keep only entries with Index > upToIndex.
+		for _, e := range entries {
+			if e.Index > upToIndex {
+				toKeep = append(toKeep, e)
+			}
+		}
+	}
+
+	// Write kept entries to dstPath using SyncNever (we fsync explicitly below).
+	dstWriter, err := walstore.NewWriter(walstore.Config{
+		Path:       dstPath,
+		SyncPolicy: walstore.SyncNever,
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("create dst WAL %s: %w", dstPath, err)
+	}
+
+	for _, e := range toKeep {
+		payload := encodeLogEntry(e)
+		if err := dstWriter.Write(payload); err != nil {
+			_ = dstWriter.Close()
+			return nil, 0, fmt.Errorf("write entry index=%d to dst WAL: %w", e.Index, err)
+		}
+	}
+
+	// Single fsync after all writes (batched).
+	if err := dstWriter.Sync(); err != nil {
+		_ = dstWriter.Close()
+		return nil, 0, fmt.Errorf("fsync dst WAL: %w", err)
+	}
+	// Close the writer-side handle; we'll reopen O_APPEND|O_WRONLY below.
+	if err := dstWriter.Close(); err != nil {
+		return nil, 0, fmt.Errorf("close dst WAL writer: %w", err)
+	}
+
+	fi, err := os.Stat(dstPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat dst WAL: %w", err)
+	}
+	newSize := fi.Size()
+
+	// Open in append mode — this handle is returned to RunExclusiveSwap as the
+	// new active writer file.
+	newFile, err := os.OpenFile(dstPath, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open dst WAL for append: %w", err)
+	}
+
+	return newFile, newSize, nil
+}
+
 // Close closes the underlying WAL writer.
 func (s *WALLogStore) Close() error {
 	return s.w.Close()
@@ -233,6 +376,22 @@ func (s *MemLogStore) LoadAll() ([]LogEntry, error) {
 	result := make([]LogEntry, len(s.entries))
 	copy(result, s.entries)
 	return result, nil
+}
+
+// CompactPrefix removes all entries with Index <= upToIndex.
+func (s *MemLogStore) CompactPrefix(upToIndex int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutAt := 0
+	for cutAt < len(s.entries) && s.entries[cutAt].Index <= upToIndex {
+		cutAt++
+	}
+	if cutAt > 0 {
+		newEntries := make([]LogEntry, len(s.entries)-cutAt)
+		copy(newEntries, s.entries[cutAt:])
+		s.entries = newEntries
+	}
+	return nil
 }
 
 // Close is a no-op.

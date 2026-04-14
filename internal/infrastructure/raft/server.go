@@ -25,11 +25,28 @@ type AppendEntriesResult struct {
 	ConflictTerm  int64 // Fast Backup: term at prevLogIndex (0 = no entry)
 }
 
+// InstallSnapshotArgs carries a single chunk of a snapshot transfer (§7).
+type InstallSnapshotArgs struct {
+	Term              int64
+	LeaderID          string
+	LastIncludedIndex int64
+	LastIncludedTerm  int64
+	Offset            int64
+	Data              []byte
+	Done              bool
+}
+
+// InstallSnapshotResult is the follower's reply to a snapshot chunk.
+type InstallSnapshotResult struct {
+	Term int64
+}
+
 // RaftHandler is the interface RaftServer calls into on incoming RPCs.
 // Separating this interface from RaftNode allows clean testing with fakes.
 type RaftHandler interface {
 	HandleAppendEntries(args AppendEntriesArgs) AppendEntriesResult
 	HandleRequestVote(term int64, candidateID string, lastLogIndex, lastLogTerm int64) (currentTerm int64, voteGranted bool)
+	HandleInstallSnapshot(req InstallSnapshotArgs) InstallSnapshotResult
 }
 
 // RaftServer implements pb.RaftServiceServer.
@@ -66,4 +83,36 @@ func (s *RaftServer) AppendEntries(_ context.Context, req *pb.AppendEntriesReque
 func (s *RaftServer) RequestVote(_ context.Context, req *pb.RequestVoteRequest) (*pb.RequestVoteResponse, error) {
 	term, granted := s.node.HandleRequestVote(req.Term, req.CandidateId, req.LastLogIndex, req.LastLogTerm)
 	return &pb.RequestVoteResponse{Term: term, VoteGranted: granted}, nil
+}
+
+// InstallSnapshot handles an incoming client-streaming InstallSnapshot RPC (§7).
+// The server receives chunks in order; on the final chunk (done=true) it returns
+// the follower's current term so the leader can detect a stale leadership.
+func (s *RaftServer) InstallSnapshot(stream pb.RaftService_InstallSnapshotServer) error {
+	var lastResult InstallSnapshotResult
+	for {
+		chunk, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+
+		args := InstallSnapshotArgs{
+			Term:              chunk.Term,
+			LeaderID:          chunk.LeaderId,
+			LastIncludedIndex: chunk.LastIncludedIndex,
+			LastIncludedTerm:  chunk.LastIncludedTerm,
+			Offset:            chunk.Offset,
+			Data:              chunk.Data,
+			Done:              chunk.Done,
+		}
+		lastResult = s.node.HandleInstallSnapshot(args)
+
+		if chunk.Done {
+			break
+		}
+	}
+
+	return stream.SendAndClose(&pb.InstallSnapshotResponse{
+		Term: lastResult.Term,
+	})
 }

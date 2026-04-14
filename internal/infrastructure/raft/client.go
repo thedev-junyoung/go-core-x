@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"google.golang.org/grpc"
@@ -10,7 +11,11 @@ import (
 	pb "github.com/junyoung/core-x/proto/pb"
 )
 
-const rpcTimeout = 100 * time.Millisecond
+const (
+	rpcTimeout           = 100 * time.Millisecond
+	snapshotChunkSize    = 1 * 1024 * 1024 // 1 MB per chunk
+	snapshotSendTimeout  = 30 * time.Second // generous timeout for large snapshots
+)
 
 // RaftClient sends Raft RPCs to a single peer.
 type RaftClient struct {
@@ -63,6 +68,60 @@ func (c *RaftClient) AppendEntries(args AppendEntriesArgs) (*pb.AppendEntriesRes
 	})
 }
 
+// InstallSnapshot sends snapshot data to the peer as a client-streaming RPC (§7).
+// data is serialised with marshalSnapshotData and split into snapshotChunkSize chunks.
+// Returns the peer's current term (for leader step-down detection) on success.
+func (c *RaftClient) InstallSnapshot(
+	term int64,
+	leaderID string,
+	meta SnapshotMeta,
+	data SnapshotData,
+) (int64, error) {
+	raw, err := marshalSnapshotData(meta.Index, meta.Term, data)
+	if err != nil {
+		return 0, fmt.Errorf("raft: install snapshot: marshal: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotSendTimeout)
+	defer cancel()
+
+	stream, err := c.rpc.InstallSnapshot(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("raft: install snapshot: open stream: %w", err)
+	}
+
+	offset := int64(0)
+	total := int64(len(raw))
+	for offset < total {
+		end := offset + snapshotChunkSize
+		if end > total {
+			end = total
+		}
+		chunk := raw[offset:end]
+		done := end == total
+
+		req := &pb.InstallSnapshotRequest{
+			Term:              term,
+			LeaderId:          leaderID,
+			LastIncludedIndex: meta.Index,
+			LastIncludedTerm:  meta.Term,
+			Offset:            offset,
+			Data:              chunk,
+			Done:              done,
+		}
+		if err := stream.Send(req); err != nil {
+			return 0, fmt.Errorf("raft: install snapshot: send chunk at offset %d: %w", offset, err)
+		}
+		offset = end
+	}
+
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		return 0, fmt.Errorf("raft: install snapshot: close stream: %w", err)
+	}
+	return resp.Term, nil
+}
+
 // Close releases the gRPC connection.
 func (c *RaftClient) Close() error {
 	return c.conn.Close()
@@ -97,6 +156,24 @@ func (p *PeerClients) All() []*RaftClient {
 		result = append(result, c)
 	}
 	return result
+}
+
+// InstallSnapshot sends a snapshot to the named peer (keyed by addr).
+// Returns an error if the peer is not found or the transfer fails.
+// On success, if the peer's term exceeds our term the caller should step down.
+func (p *PeerClients) InstallSnapshot(
+	peerID string,
+	term int64,
+	leaderID string,
+	meta SnapshotMeta,
+	data SnapshotData,
+) error {
+	c, ok := p.clients[peerID]
+	if !ok {
+		return fmt.Errorf("raft: install snapshot: unknown peer %q", peerID)
+	}
+	_, err := c.InstallSnapshot(term, leaderID, meta, data)
+	return err
 }
 
 // Close closes all peer connections.

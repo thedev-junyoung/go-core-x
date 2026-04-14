@@ -61,11 +61,31 @@ message GetResponse {
 
 // RaftService implements Phase 5a leader election RPCs.
 // Phase 5b extends AppendEntries with log entries (§5.3 Log Matching).
+// Phase 9b adds InstallSnapshot for lagging follower recovery (§7).
 service RaftService {
   // RequestVote is sent by a Candidate to collect votes.
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
   // AppendEntries is sent by the Leader for heartbeats and log replication (§5.3).
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  // InstallSnapshot transfers a snapshot from the Leader to a lagging Follower (§7).
+  rpc InstallSnapshot(stream InstallSnapshotRequest) returns (InstallSnapshotResponse);
+}
+
+// InstallSnapshotRequest is one chunk of a snapshot transfer (§7).
+// Chunks are ordered by offset; the last chunk has done=true.
+message InstallSnapshotRequest {
+  int64  term                = 1; // Leader's current term
+  string leader_id           = 2; // Leader's node ID
+  int64  last_included_index = 3; // Last Raft index covered by the snapshot
+  int64  last_included_term  = 4; // Term of last_included_index
+  int64  offset              = 5; // Byte offset of this chunk within the snapshot file
+  bytes  data                = 6; // Snapshot chunk (<= 1 MB)
+  bool   done                = 7; // True if this is the last chunk
+}
+
+// InstallSnapshotResponse is the Follower's reply after receiving all chunks.
+message InstallSnapshotResponse {
+  int64 term = 1; // Follower's current term (for leader step-down)
 }
 
 // LogEntry is a single Raft log record (§5.3).

@@ -73,6 +73,9 @@ func main() {
 	// Phase 7: nodeID → HTTP base URL map for leader redirect.
 	// Format: "n1=http://host1:8080,n2=http://host2:8081,n3=http://host3:8082"
 	raftHTTPNodes := envOr("CORE_X_RAFT_HTTP_NODES", "") // optional
+	// Phase 9a: Snapshot 설정.
+	snapshotDir := envOr("CORE_X_SNAPSHOT_DIR", "./data/snapshots")
+	snapshotThreshold := int64(envInt("CORE_X_SNAPSHOT_THRESHOLD", 10_000))
 	vnodeCount := envInt("CORE_X_VNODE_COUNT", 150)
 	forwardTimeoutStr := envOr("CORE_X_FORWARD_TIMEOUT", "3s")
 	forwardTimeout, err := time.ParseDuration(forwardTimeoutStr)
@@ -435,8 +438,30 @@ func main() {
 
 		raftKVSM = infraraft.NewKVStateMachine(raftKVStore)
 
-		// Phase 8: Startup recovery — replay KV WAL, then gap-fill from Raft log.
-		// ADR-016 §재시작 일관성 복구 절차.
+		// Phase 9a: KV state machine 및 snapshot store 배선.
+		raftNode.SetStateMachine(raftKVSM)
+
+		if err := os.MkdirAll(snapshotDir, 0750); err != nil {
+			slog.Error("raft: failed to create snapshot dir", "dir", snapshotDir, "err", err)
+			os.Exit(1)
+		}
+		snapshotStore, snapErr := infraraft.NewFileSnapshotStore(snapshotDir)
+		if snapErr != nil {
+			slog.Error("raft: failed to create snapshot store", "dir", snapshotDir, "err", snapErr)
+			os.Exit(1)
+		}
+		raftNode.SetSnapshotStore(snapshotStore, infraraft.SnapshotConfig{
+			Threshold:     snapshotThreshold,
+			CheckInterval: 5 * time.Minute,
+			Dir:           snapshotDir,
+			RetainCount:   2,
+		})
+
+		// Phase 9a: Snapshot-aware recovery.
+		// 순서: 1) snapshot 복원 → 2) WAL 로드 → 3) KV WAL gap 재적용
+		snapshotLastApplied := raftNode.RecoverFromSnapshot()
+		slog.Info("raft: snapshot recovery done", "snapshot_last_applied", snapshotLastApplied)
+
 		raftEntries, loadErr := raftLogStore.LoadAll()
 		if loadErr != nil {
 			slog.Error("raft: failed to load log entries for recovery", "err", loadErr)
@@ -449,10 +474,13 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Determine raftLastApplied: highest index in the Raft log.
+		// Determine raftLastApplied: highest index across snapshot and Raft log.
 		var raftLastApplied int64
 		if len(raftEntries) > 0 {
 			raftLastApplied = raftEntries[len(raftEntries)-1].Index
+		}
+		if snapshotLastApplied > raftLastApplied {
+			raftLastApplied = snapshotLastApplied
 		}
 
 		if bitcaskLastApplied > raftLastApplied {
@@ -495,6 +523,7 @@ func main() {
 	inframetrics.RegisterReplicationMetrics(promReg, replLag)
 	inframetrics.RegisterClusterMetrics(promReg, ring)
 	inframetrics.RegisterRaftMetrics(promReg, raftNode)
+	inframetrics.RegisterSnapshotGauge(promReg, raftNode)
 
 	// gRPC 서버 goroutine은 replication 서비스 등록 이후에 시작한다.
 	// RegisterReplicationService → Serve 순서를 보장해 race를 제거한다.

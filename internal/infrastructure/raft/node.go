@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/junyoung/core-x/proto/pb"
@@ -63,6 +64,32 @@ type RaftNode struct {
 	// resetCh is sent to from Handle* methods to reset the election timer.
 	// Buffer of 1: sender never blocks.
 	resetCh chan struct{}
+
+	// sm is the KV state machine. Non-nil enables snapshot support.
+	// When non-nil, maybeSnapshot() calls sm.TakeSnapshot().
+	sm *KVStateMachine
+
+	// Snapshot state — protected by mu.
+	//
+	// snapshotIndex is the last Raft log index covered by the most recent
+	// durable snapshot (0 = no snapshot taken yet).
+	// snapshotTerm is the term of that index.
+	// These mirror the "last included index/term" from the Raft snapshot paper.
+	snapshotIndex int64
+	snapshotTerm  int64
+
+	snapshotStore SnapshotStore  // nil disables snapshotting
+	snapshotCfg   SnapshotConfig
+
+	// snapshotInProgress is 0 when idle, 1 when a snapshot goroutine is running.
+	// CAS is used to prevent concurrent snapshots.
+	// zero-alloc: atomic.Int32 avoids a heap allocation vs sync.Mutex for this flag.
+	snapshotInProgress atomic.Int32
+
+	// snapBuf accumulates incoming snapshot chunks during an InstallSnapshot RPC.
+	// Protected by snapBufMu (separate from mu to avoid holding mu across chunk I/O).
+	snapBufMu sync.Mutex
+	snapBuf   []byte
 }
 
 // NewRaftNode creates a RaftNode. peers may be nil for single-node or test use.
@@ -155,9 +182,14 @@ func (n *RaftNode) ForceLog(lastLogIndex, lastLogTerm int64) {
 
 // lastEntry returns the index and term of the last log entry.
 // Must be called with mu held.
+//
+// Post-snapshot correctness (§5.4.1): when n.log is empty because all entries
+// have been compacted into a snapshot, we return snapshotIndex/snapshotTerm so
+// that election log-up-to-date checks and nextIndex calculations remain correct.
 func (n *RaftNode) lastEntry() (index, term int64) {
 	if len(n.log) == 0 {
-		return 0, 0
+		// No in-memory entries: use snapshot baseline (0,0 if no snapshot yet).
+		return n.snapshotIndex, n.snapshotTerm
 	}
 	e := n.log[len(n.log)-1]
 	return e.Index, e.Term
@@ -165,12 +197,17 @@ func (n *RaftNode) lastEntry() (index, term int64) {
 
 // entryAt returns the LogEntry at 1-based Raft index i, and whether it exists.
 // Must be called with mu held.
+//
+// Post-snapshot safety: after CompactPrefix, n.log may start at an index well
+// above 1 (e.g. [101, 102, 103] after a snapshot at 100). The old fast-reject
+// `index > len(n.log)` would give a false negative in that case, so we guard
+// only on index <= 0 and len(n.log) == 0, then fall through to the linear scan.
 func (n *RaftNode) entryAt(index int64) (LogEntry, bool) {
-	if index <= 0 || int(index) > len(n.log) {
+	if index <= 0 || len(n.log) == 0 {
 		return LogEntry{}, false
 	}
-	// log[i].Index may not equal i+1 if ForceLog was used to set a sentinel,
-	// so we search from the end (fast for common case: recent index).
+	// Linear search from the end: O(1) for the common case (recent index).
+	// log[i].Index may not equal i+1 after prefix compaction or ForceLog.
 	for i := len(n.log) - 1; i >= 0; i-- {
 		if n.log[i].Index == index {
 			return n.log[i], true
@@ -404,6 +441,417 @@ func (n *RaftNode) ApplyCh() <-chan LogEntry {
 	return n.applyCh
 }
 
+// SetStateMachine wires a KVStateMachine to the node for snapshot support.
+// Must be called before Run(). When sm is non-nil and snapshotStore is set,
+// maybeSnapshot() will be called periodically.
+func (n *RaftNode) SetStateMachine(sm *KVStateMachine) {
+	n.sm = sm
+}
+
+// SetSnapshotStore enables snapshot persistence. Must be called before Run().
+// cfg.Threshold == 0 disables automatic snapshotting.
+func (n *RaftNode) SetSnapshotStore(store SnapshotStore, cfg SnapshotConfig) {
+	n.snapshotStore = store
+	n.snapshotCfg = cfg
+}
+
+// maybeSnapshot checks whether a snapshot should be taken and, if so, launches
+// a snapshot goroutine. It is safe to call from any goroutine; it must NOT be
+// called with mu held.
+//
+// Snapshot trigger condition: capturedIndex - snapshotIndex >= Threshold.
+// Using sm.lastApplied (not commitIndex) ensures only fully-applied state
+// is captured — no uncommitted entries leak into the snapshot.
+func (n *RaftNode) maybeSnapshot() {
+	if n.snapshotStore == nil || n.snapshotCfg.Threshold <= 0 || n.sm == nil {
+		return
+	}
+	// CAS: prevent concurrent snapshots.
+	if !n.snapshotInProgress.CompareAndSwap(0, 1) {
+		return
+	}
+
+	// Capture state machine snapshot (COW — safe outside mu).
+	data, capturedIndex, err := n.sm.TakeSnapshot()
+	if err != nil {
+		n.snapshotInProgress.Store(0)
+		slog.Error("raft: TakeSnapshot failed", "err", err)
+		return
+	}
+
+	if capturedIndex == 0 {
+		// Nothing has been applied yet; no snapshot to take.
+		n.snapshotInProgress.Store(0)
+		return
+	}
+
+	n.mu.Lock()
+	delta := capturedIndex - n.snapshotIndex
+	if delta < n.snapshotCfg.Threshold {
+		// Not enough new entries since the last snapshot.
+		n.mu.Unlock()
+		n.snapshotInProgress.Store(0)
+		return
+	}
+
+	// Resolve the term for capturedIndex.
+	var capturedTerm int64
+	if e, ok := n.entryAt(capturedIndex); ok {
+		capturedTerm = e.Term
+	} else if capturedIndex == n.snapshotIndex {
+		capturedTerm = n.snapshotTerm
+	} else {
+		// capturedIndex is not in the log — already compacted in a previous
+		// snapshot cycle. Skip to avoid creating a snapshot with term=0.
+		n.mu.Unlock()
+		n.snapshotInProgress.Store(0)
+		return
+	}
+	n.mu.Unlock()
+
+	meta := SnapshotMeta{
+		Index:     capturedIndex,
+		Term:      capturedTerm,
+		CreatedAt: time.Now(),
+	}
+
+	go func() {
+		defer n.snapshotInProgress.Store(0)
+
+		// INV-S3: Save snapshot durably before compacting the log.
+		if err := n.snapshotStore.Save(meta, data); err != nil {
+			slog.Error("raft: snapshot save failed",
+				"index", capturedIndex, "term", capturedTerm, "err", err)
+			return
+		}
+
+		// Prune old snapshots (best-effort; failure is non-fatal).
+		retain := n.snapshotCfg.RetainCount
+		if retain < 1 {
+			retain = 2 // safe default
+		}
+		_ = n.snapshotStore.Prune(retain)
+
+		// Truncate in-memory log prefix.
+		n.mu.Lock()
+		n.truncateLogPrefix(capturedIndex, capturedTerm)
+		n.mu.Unlock()
+
+		// Compact WAL on disk (best-effort; snapshot already durable — failure
+		// is recoverable at next restart because WAL replay will skip already-
+		// snapshotted entries after RestoreSnapshot sets snapshotIndex).
+		if n.logStore != nil {
+			if err := n.logStore.CompactPrefix(capturedIndex); err != nil {
+				slog.Error("raft: WAL compact prefix failed",
+					"upToIndex", capturedIndex, "err", err)
+			}
+		}
+
+		slog.Info("raft: snapshot complete",
+			"index", capturedIndex, "term", capturedTerm)
+	}()
+}
+
+// truncateLogPrefix removes log entries with Index <= upToIndex from n.log
+// and updates snapshotIndex/snapshotTerm.
+// Must be called with mu held.
+//
+// Explicit copy semantics: we allocate a fresh slice to release the memory
+// of the truncated prefix (GC pressure reduction on large logs).
+func (n *RaftNode) truncateLogPrefix(upToIndex, term int64) {
+	cutoff := 0
+	for i, e := range n.log {
+		if e.Index <= upToIndex {
+			cutoff = i + 1
+		} else {
+			break
+		}
+	}
+	if cutoff > 0 {
+		// Explicit copy: avoids retaining the backing array of the old slice.
+		newLog := make([]LogEntry, len(n.log)-cutoff)
+		copy(newLog, n.log[cutoff:])
+		n.log = newLog
+	}
+	n.snapshotIndex = upToIndex
+	n.snapshotTerm = term
+}
+
+// HandleInstallSnapshot applies a snapshot chunk from the leader (§7).
+// On the final chunk (done=true) the snapshot is applied to the state machine
+// and persisted to snapshotStore.
+//
+// Invariants enforced:
+//   - INV-S1: snapshot index N implies entries [1..N] are committed and applied.
+//   - §7 optimisation: if we already have the entry at LastIncludedIndex with
+//     matching term and have applied it, only discard the log prefix.
+//
+// Must NOT be called with mu held.
+func (n *RaftNode) HandleInstallSnapshot(args InstallSnapshotArgs) InstallSnapshotResult {
+	n.mu.Lock()
+
+	// §7: stale term — reject.
+	if args.Term < n.currentTerm {
+		term := n.currentTerm
+		n.mu.Unlock()
+		return InstallSnapshotResult{Term: term}
+	}
+
+	// Higher term: step down.
+	if args.Term > n.currentTerm {
+		n.currentTerm = args.Term
+		n.votedFor = ""
+		n.role = RoleFollower
+		if n.meta != nil {
+			if err := n.meta.Save(RaftMeta{Term: args.Term, VotedFor: ""}); err != nil {
+				slog.Warn("raft: install snapshot: failed to persist term step-down", "err", err)
+			}
+		}
+	}
+	n.role = RoleFollower
+	n.leaderID = args.LeaderID
+
+	// Reset election timer (non-blocking).
+	select {
+	case n.resetCh <- struct{}{}:
+	default:
+	}
+
+	currentTerm := n.currentTerm
+	n.mu.Unlock()
+
+	// Accumulate chunk into the in-memory buffer.
+	n.snapBufMu.Lock()
+	if args.Offset == 0 {
+		// First chunk: (re)initialise buffer.
+		n.snapBuf = make([]byte, 0, int64(len(args.Data))*10)
+	}
+	n.snapBuf = append(n.snapBuf, args.Data...)
+	n.snapBufMu.Unlock()
+
+	if !args.Done {
+		return InstallSnapshotResult{Term: currentTerm}
+	}
+
+	// Last chunk — apply the snapshot.
+	n.snapBufMu.Lock()
+	buf := n.snapBuf
+	n.snapBuf = nil
+	n.snapBufMu.Unlock()
+
+	// Deserialise using the ADR-017 §3 format (same as FileSnapshotStore).
+	snapMeta, data, err := unmarshalSnapshotData(buf)
+	if err != nil {
+		slog.Error("raft: install snapshot: unmarshal failed", "err", err)
+		return InstallSnapshotResult{Term: currentTerm}
+	}
+	// Cross-check: the decoded index/term must match what the leader announced.
+	if snapMeta.Index != args.LastIncludedIndex || snapMeta.Term != args.LastIncludedTerm {
+		slog.Error("raft: install snapshot: index/term mismatch in payload",
+			"announced_index", args.LastIncludedIndex, "decoded_index", snapMeta.Index)
+		return InstallSnapshotResult{Term: currentTerm}
+	}
+
+	n.mu.Lock()
+
+	// §7 optimisation: if we already have the matching entry and the state machine
+	// is up-to-date, just compact the prefix — no full restore needed.
+	if e, ok := n.entryAt(args.LastIncludedIndex); ok &&
+		e.Term == args.LastIncludedTerm &&
+		n.sm != nil && n.sm.LastApplied() >= args.LastIncludedIndex {
+		n.truncateLogPrefix(args.LastIncludedIndex, args.LastIncludedTerm)
+		n.mu.Unlock()
+		return InstallSnapshotResult{Term: currentTerm}
+	}
+
+	// Full restore: replace state machine state.
+	if n.sm != nil {
+		// Unlock around the potentially blocking RestoreSnapshot call.
+		n.mu.Unlock()
+		if err := n.sm.RestoreSnapshot(data, args.LastIncludedIndex); err != nil {
+			slog.Error("raft: install snapshot: restore failed", "err", err)
+			return InstallSnapshotResult{Term: currentTerm}
+		}
+		n.mu.Lock()
+	}
+
+	// Discard log; update snapshot metadata and commitIndex.
+	n.log = nil
+	n.snapshotIndex = args.LastIncludedIndex
+	n.snapshotTerm = args.LastIncludedTerm
+	if n.commitIndex < args.LastIncludedIndex {
+		n.commitIndex = args.LastIncludedIndex
+	}
+	if n.lastApplied < args.LastIncludedIndex {
+		n.lastApplied = args.LastIncludedIndex
+	}
+	n.mu.Unlock()
+
+	// Persist the received snapshot to disk so recovery after a crash works.
+	if n.snapshotStore != nil {
+		meta := SnapshotMeta{
+			Index:     args.LastIncludedIndex,
+			Term:      args.LastIncludedTerm,
+			CreatedAt: time.Now(),
+		}
+		if err := n.snapshotStore.Save(meta, data); err != nil {
+			slog.Error("raft: install snapshot: store save failed", "err", err)
+		} else {
+			retain := n.snapshotCfg.RetainCount
+			if retain < 1 {
+				retain = 2
+			}
+			_ = n.snapshotStore.Prune(retain)
+		}
+	}
+
+	slog.Info("raft: snapshot installed",
+		"index", args.LastIncludedIndex,
+		"term", args.LastIncludedTerm)
+	return InstallSnapshotResult{Term: currentTerm}
+}
+
+// sendSnapshot sends the current snapshot to a lagging peer (§7).
+// Called by sendHeartbeats when nextIndex[peer] <= snapshotIndex.
+// Updates nextIndex/matchIndex on success.
+func (n *RaftNode) sendSnapshot(peerID string) {
+	if n.snapshotStore == nil || n.peers == nil {
+		return
+	}
+
+	n.mu.Lock()
+	meta, err := n.snapshotStore.Latest()
+	if err != nil {
+		n.mu.Unlock()
+		slog.Warn("raft: send snapshot: no latest snapshot", "peer", peerID, "err", err)
+		return
+	}
+	currentTerm := n.currentTerm
+	nodeID := n.id
+	n.mu.Unlock()
+
+	_, data, err := n.snapshotStore.Load(meta.Index)
+	if err != nil {
+		slog.Error("raft: send snapshot: load failed", "peer", peerID, "err", err)
+		return
+	}
+
+	if err := n.peers.InstallSnapshot(peerID, currentTerm, nodeID, meta, data); err != nil {
+		slog.Warn("raft: send snapshot failed", "peer", peerID, "err", err)
+		return
+	}
+
+	n.mu.Lock()
+	if n.nextIndex[peerID] < meta.Index+1 {
+		n.nextIndex[peerID] = meta.Index + 1
+	}
+	if n.matchIndex[peerID] < meta.Index {
+		n.matchIndex[peerID] = meta.Index
+	}
+	n.mu.Unlock()
+
+	slog.Info("raft: snapshot sent", "peer", peerID, "index", meta.Index)
+}
+
+// runSnapshotTicker fires maybeSnapshot at cfg.CheckInterval.
+// Runs as a background goroutine inside Run(). Exits when ctx is cancelled.
+func (n *RaftNode) runSnapshotTicker(ctx context.Context) {
+	ticker := time.NewTicker(n.snapshotCfg.CheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.maybeSnapshot()
+		}
+	}
+}
+
+// RecoverFromSnapshot restores the state machine and node snapshot metadata
+// from the latest durable snapshot on disk.
+//
+// Call order (startup sequence):
+//  1. NewRaftNode(...)
+//  2. node.SetStateMachine(sm)
+//  3. node.SetSnapshotStore(store, cfg)
+//  4. node.RecoverFromSnapshot()          ← this method
+//  5. filter WAL entries: keep Index > node.SnapshotIndex()
+//  6. sm.RecoverFromStore(filteredEntries)
+//  7. node.Run(ctx)
+//
+// Returns the snapshot index (0 if no snapshot was found — not an error).
+// After this call, n.SnapshotIndex() reflects the restored baseline.
+func (n *RaftNode) RecoverFromSnapshot() int64 {
+	return n.recoverFromSnapshot()
+}
+
+// SnapshotIndex returns the last included index of the most recent snapshot.
+// Safe to call from any goroutine.
+func (n *RaftNode) SnapshotIndex() int64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.snapshotIndex
+}
+
+// recoverFromSnapshot restores state machine and node snapshot metadata from
+// the latest durable snapshot. Must be called before WAL log replay so that
+// only entries with Index > snapshotIndex are replayed.
+//
+// Returns the snapshot index (0 if no snapshot found — not an error).
+func (n *RaftNode) recoverFromSnapshot() int64 {
+	if n.snapshotStore == nil || n.sm == nil {
+		return 0
+	}
+
+	latestMeta, err := n.snapshotStore.Latest()
+	if err != nil {
+		if err == ErrSnapshotNotFound {
+			// No snapshots — fresh start.
+			return 0
+		}
+		slog.Error("raft: failed to query latest snapshot during recovery", "err", err)
+		return 0
+	}
+
+	_, data, err := n.snapshotStore.Load(latestMeta.Index)
+	if err != nil {
+		slog.Error("raft: failed to load latest snapshot during recovery",
+			"index", latestMeta.Index, "err", err)
+		return 0
+	}
+
+	if err := n.sm.RestoreSnapshot(data, latestMeta.Index); err != nil {
+		slog.Error("raft: failed to restore snapshot into state machine",
+			"index", latestMeta.Index, "err", err)
+		return 0
+	}
+
+	n.snapshotIndex = latestMeta.Index
+	n.snapshotTerm = latestMeta.Term
+
+	// Filter n.log: discard entries already covered by the snapshot.
+	// n.log was populated by NewRaftNode from the WAL before this call.
+	filtered := n.log[:0]
+	for _, e := range n.log {
+		if e.Index > latestMeta.Index {
+			filtered = append(filtered, e)
+		}
+	}
+	if len(filtered) < len(n.log) {
+		newLog := make([]LogEntry, len(filtered))
+		copy(newLog, filtered)
+		n.log = newLog
+		slog.Info("raft: log entries before snapshot discarded",
+			"snapshot_index", latestMeta.Index, "remaining", len(n.log))
+	}
+
+	slog.Info("raft: restored from snapshot",
+		"index", latestMeta.Index, "term", latestMeta.Term)
+
+	return latestMeta.Index
+}
+
 // Propose appends data to the leader's log and returns the assigned index and
 // term. Returns isLeader=false when this node is not the current leader;
 // callers should redirect the request to the actual leader.
@@ -442,6 +890,11 @@ func (n *RaftNode) Propose(data []byte) (index int64, term int64, isLeader bool)
 // Call this in a dedicated goroutine.
 func (n *RaftNode) Run(ctx context.Context) {
 	go n.runApplyLoop(ctx)
+
+	// Start snapshot ticker if configured.
+	if n.snapshotStore != nil && n.snapshotCfg.CheckInterval > 0 && n.sm != nil {
+		go n.runSnapshotTicker(ctx)
+	}
 
 	for {
 		n.mu.Lock()
@@ -751,8 +1204,21 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 		lastSentIdx  int64
 	}
 	sends := make([]peerArgs, 0, len(peers))
+	// snapshotIdx is captured here to avoid repeated lock acquisitions inside
+	// the goroutines spawned for snapshot sends below.
+	snapshotIdx := n.snapshotIndex
+
 	for _, peer := range peers {
 		ni := n.nextIndex[peer.addr]
+
+		// §7: if the peer is too far behind, send the snapshot instead of log entries.
+		if n.snapshotStore != nil && ni <= snapshotIdx {
+			// Launch snapshot goroutine; do not add to sends (no AppendEntries needed).
+			peerAddr := peer.addr
+			go n.sendSnapshot(peerAddr)
+			continue
+		}
+
 		prevIdx := ni - 1
 		var prevTerm int64
 		if prevIdx > 0 {
@@ -803,7 +1269,9 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 	total := len(peers) + 1 // +1 for self
 	majority := total/2 + 1
 
-	for range peers {
+	// Only collect responses from peers that got AppendEntries (sends).
+	// Peers that were routed to sendSnapshot do not write to ch.
+	for range sends {
 		select {
 		case <-ctx.Done():
 			return
