@@ -14,7 +14,7 @@ func makeEntry(index int64, op, key, value string) LogEntry {
 }
 
 func TestKVStateMachine_SetAndGet(t *testing.T) {
-	sm := NewKVStateMachine()
+	sm := NewKVStateMachine(nil)
 	ch := make(chan LogEntry, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -36,7 +36,7 @@ func TestKVStateMachine_SetAndGet(t *testing.T) {
 }
 
 func TestKVStateMachine_Del(t *testing.T) {
-	sm := NewKVStateMachine()
+	sm := NewKVStateMachine(nil)
 	ch := make(chan LogEntry, 2)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -59,7 +59,7 @@ func TestKVStateMachine_Del(t *testing.T) {
 }
 
 func TestKVStateMachine_WaitForIndex_Timeout(t *testing.T) {
-	sm := NewKVStateMachine()
+	sm := NewKVStateMachine(nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -71,7 +71,7 @@ func TestKVStateMachine_WaitForIndex_Timeout(t *testing.T) {
 }
 
 func TestKVStateMachine_MalformedEntry(t *testing.T) {
-	sm := NewKVStateMachine()
+	sm := NewKVStateMachine(nil)
 	ch := make(chan LogEntry, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -97,7 +97,7 @@ func TestSingleNode_ProposeApplyRoundTrip(t *testing.T) {
 	defer cancel()
 	go node.Run(ctx)
 
-	sm := NewKVStateMachine()
+	sm := NewKVStateMachine(nil)
 	go sm.Run(ctx, node.ApplyCh())
 
 	// Wait until the node becomes leader.

@@ -314,6 +314,62 @@ func (w *Writer) WriteEvent(e *domain.Event) error {
 	return err
 }
 
+// WriteOffset writes a raw payload and returns the offset at which it was written.
+//
+// This is the low-level counterpart to WriteEventOffset for callers that
+// construct their own payload (e.g. the Raft KV store path).
+//
+// Returns (offset of this record, error).
+// Offset is the file position immediately before this record.
+//
+// 성능: 0 allocs/op (pool 히트 시, SyncNever 정책)
+func (w *Writer) WriteOffset(payload []byte) (int64, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	var header [RecordHeaderSize]byte
+	binary.BigEndian.PutUint32(header[0:4], MagicNumber)
+	binary.BigEndian.PutUint64(header[4:12], uint64(time.Now().UnixNano()))
+	binary.BigEndian.PutUint32(header[12:16], uint32(len(payload)))
+
+	bp := w.bufPool.Get().(*[]byte)
+	buf := (*bp)[:0]
+
+	needed := RecordHeaderSize + len(payload) + RecordChecksumSize
+	if cap(buf) < needed {
+		buf = make([]byte, 0, needed)
+	}
+
+	buf = append(buf, header[:]...)
+	buf = append(buf, payload...)
+
+	checksum := crc32.ChecksumIEEE(buf)
+	var checksumBytes [RecordChecksumSize]byte
+	binary.BigEndian.PutUint32(checksumBytes[0:4], checksum)
+	buf = append(buf, checksumBytes[:]...)
+
+	offset := w.sizeTracker.Load()
+
+	_, err := w.file.Write(buf)
+
+	*bp = buf
+	w.bufPool.Put(bp)
+
+	if err != nil {
+		return 0, err
+	}
+
+	w.sizeTracker.Add(int64(len(buf)))
+
+	if w.cfg.SyncPolicy == SyncImmediate {
+		if err := w.file.Sync(); err != nil {
+			return offset, err
+		}
+	}
+
+	return offset, nil
+}
+
 // Sync는 명시적 fsync 호출을 강제한다.
 //
 // SyncNever 정책이어도 호출 가능하며, 항상 OS 버퍼를 디스크에 플러시한다.

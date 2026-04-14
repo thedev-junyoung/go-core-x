@@ -35,7 +35,7 @@ func TestProposeHandler_SetAndRead(t *testing.T) {
 	node, cancel := startLeader(t)
 	defer cancel()
 
-	sm := infraraft.NewKVStateMachine()
+	sm := infraraft.NewKVStateMachine(nil)
 	smCtx, smCancel := context.WithCancel(context.Background())
 	defer smCancel()
 	go sm.Run(smCtx, node.ApplyCh())
@@ -62,7 +62,7 @@ func TestProposeHandler_SetAndRead(t *testing.T) {
 func TestProposeHandler_NotLeader(t *testing.T) {
 	// A node that has never run will not be leader.
 	node := infraraft.NewRaftNode("n1", nil, nil, nil)
-	sm := infraraft.NewKVStateMachine()
+	sm := infraraft.NewKVStateMachine(nil)
 	h := NewProposeHandler(node, sm, nil)
 
 	body := `{"key":"k","value":"v"}`
@@ -80,7 +80,7 @@ func TestProposeHandler_LeaderRedirect(t *testing.T) {
 	node := infraraft.NewRaftNode("n1", nil, nil, nil)
 	node.ForceLeaderID("n2") // set knownLeaderID without running
 
-	sm := infraraft.NewKVStateMachine()
+	sm := infraraft.NewKVStateMachine(nil)
 	addrMap := map[string]string{
 		"n2": "http://node2:8081",
 	}
@@ -101,7 +101,7 @@ func TestProposeHandler_LeaderRedirect(t *testing.T) {
 
 func TestProposeHandler_MissingKey(t *testing.T) {
 	node := infraraft.NewRaftNode("n1", nil, nil, nil)
-	sm := infraraft.NewKVStateMachine()
+	sm := infraraft.NewKVStateMachine(nil)
 	h := NewProposeHandler(node, sm, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/raft/kv", bytes.NewBufferString(`{"value":"v"}`))
@@ -114,7 +114,7 @@ func TestProposeHandler_MissingKey(t *testing.T) {
 }
 
 func TestRaftKVGetHandler_FoundAndNotFound(t *testing.T) {
-	sm := infraraft.NewKVStateMachine()
+	sm := infraraft.NewKVStateMachine(nil)
 
 	// Manually seed the state machine by sending entries directly.
 	ch := make(chan infraraft.LogEntry, 1)

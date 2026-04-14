@@ -410,10 +410,77 @@ func main() {
 			"meta_path", metaPath,
 		)
 
-		// Phase 6: KV state machine — consumes ApplyCh, applies committed entries.
-		raftKVSM = infraraft.NewKVStateMachine()
+		// Phase 6/8: KV state machine — consumes ApplyCh, applies committed entries.
+		// Phase 8: Bitcask KVStore is used as the durable backend (data/kv.wal).
+		// SyncInterval(100ms) is chosen per ADR-016: Raft WAL provides primary
+		// durability; KV WAL is a fast-recovery cache layer.
+		kvWALPath := filepath.Join(filepath.Dir(walPath), "kv.wal")
+		kvWALWriter, kvWALErr := wal.NewWriter(wal.Config{
+			Path:         kvWALPath,
+			SyncPolicy:   wal.SyncInterval,
+			SyncInterval: 100 * time.Millisecond,
+		})
+		if kvWALErr != nil {
+			slog.Error("raft: failed to open kv wal writer", "path", kvWALPath, "err", kvWALErr)
+			os.Exit(1)
+		}
+		defer kvWALWriter.Close()
+
+		raftKVStore, raftKVStoreErr := kvstore.NewStore(kvWALWriter, kvWALPath, 1_000_000)
+		if raftKVStoreErr != nil {
+			slog.Error("raft: failed to create raft kv store", "path", kvWALPath, "err", raftKVStoreErr)
+			os.Exit(1)
+		}
+		defer raftKVStore.Close()
+
+		raftKVSM = infraraft.NewKVStateMachine(raftKVStore)
+
+		// Phase 8: Startup recovery — replay KV WAL, then gap-fill from Raft log.
+		// ADR-016 §재시작 일관성 복구 절차.
+		raftEntries, loadErr := raftLogStore.LoadAll()
+		if loadErr != nil {
+			slog.Error("raft: failed to load log entries for recovery", "err", loadErr)
+			os.Exit(1)
+		}
+
+		bitcaskLastApplied, recoverErr := raftKVSM.RecoverFromStore(raftEntries)
+		if recoverErr != nil {
+			slog.Error("raft: kv store recovery failed", "err", recoverErr)
+			os.Exit(1)
+		}
+
+		// Determine raftLastApplied: highest index in the Raft log.
+		var raftLastApplied int64
+		if len(raftEntries) > 0 {
+			raftLastApplied = raftEntries[len(raftEntries)-1].Index
+		}
+
+		if bitcaskLastApplied > raftLastApplied {
+			// INV-2 violation: impossible under correct operation.
+			// Fail-fast; operator must investigate.
+			slog.Error("FATAL: bitcask lastApplied ahead of raft log — data inconsistency",
+				"bitcask", bitcaskLastApplied, "raft", raftLastApplied)
+			os.Exit(1)
+		}
+
+		if bitcaskLastApplied < raftLastApplied {
+			// Gap: entries [bitcaskLastApplied+1 .. raftLastApplied] not yet in KV store.
+			// Apply them directly before starting the normal consume loop.
+			slog.Info("raft: replaying gap entries into kv store",
+				"from", bitcaskLastApplied+1, "to", raftLastApplied)
+			for _, entry := range raftEntries {
+				if entry.Index > bitcaskLastApplied {
+					raftKVSM.ApplyDirect(entry)
+				}
+			}
+		}
+
+		slog.Info("raft: kv state machine started",
+			"bitcask_last_applied", bitcaskLastApplied,
+			"raft_last_applied", raftLastApplied,
+		)
+
 		go raftKVSM.Run(raftCtx, raftNode.ApplyCh())
-		slog.Info("raft: kv state machine started")
 
 		// Phase 5b: RoleController — 50ms polling, drives ReplicationManager.
 		if replManager != nil {

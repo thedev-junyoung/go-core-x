@@ -45,6 +45,11 @@ type Store struct {
 	writer   *wal.Writer
 	readFile *os.File
 	walPath  string
+
+	// raftLastApplied is the last Raft log index applied to this KV store.
+	// Updated atomically by WriteKV/DeleteKV (raft_store.go).
+	// Zero on fresh start; restored from WAL by RecoverKV.
+	raftLastApplied int64
 }
 
 // NewStore creates a KV store with WAL backing and in-memory index.
