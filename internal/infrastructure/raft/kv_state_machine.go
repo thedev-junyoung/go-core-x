@@ -300,15 +300,22 @@ func (sm *KVStateMachine) TakeSnapshot() (SnapshotData, int64, error) {
 // Replaces sm.data atomically under a write lock and updates lastApplied.
 // Called either during startup (before Run()) or by InstallSnapshot (Phase 9b).
 // Concurrent apply() calls are excluded by sm.mu.Lock().
+//
+// After restoring, all WaitForIndex callers waiting on any index <= lastApplied
+// are unblocked. This is necessary because the install-snapshot path sets
+// lastApplied directly (bypassing apply()), so notifyWaiters is never called
+// for those indices otherwise.
 func (sm *KVStateMachine) RestoreSnapshot(data SnapshotData, lastApplied int64) error {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
 	sm.data = make(map[string]string, len(data.KV))
 	for k, v := range data.KV {
 		sm.data[k] = v
 	}
 	sm.lastApplied.Store(lastApplied)
+	sm.mu.Unlock()
+
+	// Wake up all waiters for indices <= lastApplied.
+	sm.notifyAllWaitersUpTo(lastApplied)
 	return nil
 }
 
@@ -319,6 +326,25 @@ func (sm *KVStateMachine) notifyWaiters(index int64) {
 	sm.waitMu.Unlock()
 
 	for _, ch := range waiters {
+		close(ch)
+	}
+}
+
+// notifyAllWaitersUpTo wakes every registered waiter for indices <= upTo.
+// Called by RestoreSnapshot to unblock WaitForIndex callers after an
+// InstallSnapshot replaces the state machine state directly.
+func (sm *KVStateMachine) notifyAllWaitersUpTo(upTo int64) {
+	sm.waitMu.Lock()
+	var toNotify []chan struct{}
+	for idx, chans := range sm.waiters {
+		if idx <= upTo {
+			toNotify = append(toNotify, chans...)
+			delete(sm.waiters, idx)
+		}
+	}
+	sm.waitMu.Unlock()
+
+	for _, ch := range toNotify {
 		close(ch)
 	}
 }
