@@ -150,24 +150,21 @@ Specify explicitly [what] needs to be done.
 ```
 FOR EACH Task IN Implementation_Plan:
 
-1️⃣ TDD: Write tests (RED)
-   @superpowers:test-driven-development
-   → Verify tests actually FAIL
+1. Step Contract
+   - @core-x-principal-architect and @core-x-forge-engineer agree on implementation scope
+   - Output: docs/spec/SPEC_FOR_STEP.md (success criteria + data consistency invariants)
 
-2️⃣ Implement: Make tests pass (GREEN)
-   → go test -v
-   → All new tests PASS
+2. Adversarial Implementation
+   - Forge: @core-x-forge-engineer writes the code
+   - Nemesis: @chaos-auditor immediately challenges — "this code breaks under scenario X"
+   - Forge: revises and optimizes based on the critique (repeat at least 3 rounds)
 
-3️⃣ Refactor: Clean up code
-   → Remove duplication
-   → Add architecture comments
-   → Tests still PASS
+3. Chaos Verification
+   - @chaos-auditor executes designed chaos scenarios (network partition, process crash, etc.)
+   - Confirm all invariants in SPEC_FOR_STEP.md are satisfied via result logs
 
-4️⃣ Code Review
-   @superpowers:requesting-code-review
-   → Edge cases, performance, style
-   → Fix feedback (if any)
-   → Review approval
+4. Final Approval
+   - @core-x-principal-architect confirms conformance to original design and approves
 ```
 
 ---
@@ -293,7 +290,14 @@ Documentation
 □ OPERATION.md written (operations guide)
 □ Functions have comments (domain/application/infrastructure separation)
 
+Reliability
+□ WAL checksum validation passes even on partial write
+□ Bitcask index 100% rebuilt after abrupt process crash + restart
+□ Linearizability maintained under network partition
+
 Performance
+□ Write latency P99 < 50ms (3-node quorum)
+□ Memory usage stable under 100k events/sec sustained load
 □ Writer: 1M req/sec achieved (SyncInterval 100ms)
 □ Reader: 100MB file sequential read < 1sec
 □ Memory: steady state < 100MB

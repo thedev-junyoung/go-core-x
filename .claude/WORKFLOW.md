@@ -92,37 +92,21 @@
 ```
 FOR EACH Task IN Implementation_Plan:
 
-├─ 1️⃣ TDD: Write Tests (RED)
-│  │
-│  ├─ @superpowers:test-driven-development
-│  │  Input: function name + expected behavior
-│  │  Output: test code (RED state)
-│  │
-│  ├─ Verify: Does test actually FAIL?
-│  └─ Result: test_*.go created + FAIL confirmed
-│
-├─ 2️⃣ Implement (GREEN)
-│  │
-│  ├─ Write minimal code to pass tests
-│  ├─ go test -v (verify all new tests PASS)
-│  └─ Result: all new tests GREEN
-│
-├─ 3️⃣ Refactor
-│  │
-│  ├─ Remove code duplication
-│  ├─ Add architecture comments
-│  └─ Verify: tests still PASS
-│
-├─ 4️⃣ Partial Code Review
-│  │
-│  ├─ @superpowers:requesting-code-review
-│  │  Input: just-written function
-│  │  Output: feedback (edge cases, performance, style)
-│  │
-│  ├─ Apply fixes (if any)
-│  └─ Result: review approval
-│
-└─ Next step in plan
+1. Step Contract
+   - @core-x-principal-architect and @core-x-forge-engineer agree on implementation scope
+   - Output: docs/spec/SPEC_FOR_STEP.md (success criteria + data consistency invariants)
+
+2. Adversarial Implementation
+   - Forge: @core-x-forge-engineer writes the code
+   - Nemesis: @chaos-auditor immediately challenges — "this code breaks under scenario X"
+   - Forge: revises and optimizes based on the critique (repeat at least 3 rounds)
+
+3. Chaos Verification
+   - @chaos-auditor executes designed chaos scenarios (network partition, process crash, etc.)
+   - Confirm all invariants in SPEC_FOR_STEP.md are satisfied via result logs
+
+4. Final Approval
+   - @core-x-principal-architect confirms conformance to original design and approves
 ```
 
 ---
@@ -272,7 +256,14 @@ Documentation
 □ ADR for every major architectural change is recorded in docs/adr/
 □ All functions have comments (domain/app/infra separation explained)
 
+Reliability
+□ WAL checksum validation passes even on partial write
+□ Bitcask index 100% rebuilt after abrupt process crash + restart
+□ Linearizability maintained under network partition
+
 Performance
+□ Write latency P99 < 50ms (3-node quorum)
+□ Memory usage stable under 100k events/sec sustained load
 □ Writer: 1M req/sec achieved (SyncInterval 100ms policy)
 □ Reader: 100M byte file sequential read < 1 second
 □ Memory: steady state < 100MB
