@@ -216,6 +216,31 @@ func (n *RaftNode) entryAt(index int64) (LogEntry, bool) {
 	return LogEntry{}, false
 }
 
+// termAt returns the term for a given 1-based Raft index, or (0, false) if
+// unknown. It checks the in-memory log first, then falls back to the snapshot
+// baseline for the exact snapshotIndex boundary.
+//
+// Post-snapshot correctness: after CompactPrefix, entries with Index <=
+// snapshotIndex are no longer in n.log. If the caller asks for snapshotIndex
+// itself (the "prev" boundary of the first new batch), we must return
+// snapshotTerm rather than 0 to avoid false log-mismatch rejections.
+//
+// Must be called with mu held.
+func (n *RaftNode) termAt(index int64) (term int64, ok bool) {
+	if index <= 0 {
+		return 0, false
+	}
+	if e, found := n.entryAt(index); found {
+		return e.Term, true
+	}
+	// Snapshot boundary: the exact last-included index is known even after
+	// log compaction.
+	if index == n.snapshotIndex {
+		return n.snapshotTerm, true
+	}
+	return 0, false
+}
+
 // CommitIndex returns the current commitIndex. Safe to call from any goroutine.
 func (n *RaftNode) CommitIndex() int64 {
 	n.mu.Lock()
@@ -277,22 +302,22 @@ func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesResu
 
 	// §5.3 Consistency check: prevLogIndex/prevLogTerm must match.
 	if args.PrevLogIndex > 0 {
-		prev, ok := n.entryAt(args.PrevLogIndex)
+		prevTerm, ok := n.termAt(args.PrevLogIndex)
 		if !ok {
-			// We don't have an entry at prevLogIndex.
-			// Fast Backup: tell the leader the length of our log so it can
-			// jump directly to the next valid index.
+			// We don't have an entry at prevLogIndex (and it is not the
+			// snapshot boundary). Fast Backup: tell the leader the length
+			// of our log so it can jump directly to the next valid index.
 			lastIdx, _ := n.lastEntry()
 			return reject(lastIdx+1, 0)
 		}
-		if prev.Term != args.PrevLogTerm {
-			// Term mismatch: find the first index of prev.Term so the leader
+		if prevTerm != args.PrevLogTerm {
+			// Term mismatch: find the first index of prevTerm so the leader
 			// can skip the entire conflicting term in one round-trip.
-			conflictTerm := prev.Term
-			conflictIdx := prev.Index
+			conflictTerm := prevTerm
+			conflictIdx := args.PrevLogIndex
 			for conflictIdx > 1 {
-				e, ok := n.entryAt(conflictIdx - 1)
-				if !ok || e.Term != conflictTerm {
+				t, ok := n.termAt(conflictIdx - 1)
+				if !ok || t != conflictTerm {
 					break
 				}
 				conflictIdx--
@@ -1222,8 +1247,10 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 		prevIdx := ni - 1
 		var prevTerm int64
 		if prevIdx > 0 {
-			if e, ok := n.entryAt(prevIdx); ok {
-				prevTerm = e.Term
+			// termAt covers both in-log entries and the snapshotIndex boundary
+			// so that after log compaction the prevTerm is not silently 0.
+			if t, ok := n.termAt(prevIdx); ok {
+				prevTerm = t
 			}
 		}
 		var entries []*pb.LogEntry
