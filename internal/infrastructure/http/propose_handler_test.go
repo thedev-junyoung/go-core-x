@@ -131,7 +131,11 @@ func TestRaftKVGetHandler_FoundAndNotFound(t *testing.T) {
 		t.Fatalf("WaitForIndex: %v", err)
 	}
 
-	getH := NewRaftKVGetHandler(sm)
+	// RaftNode must be in leader role so ReadIndex succeeds.
+	node := infraraft.NewRaftNode("n1", nil, nil, nil)
+	node.ForceRole(infraraft.RoleLeader, 1)
+
+	getH := NewRaftKVGetHandler(node, sm, nil)
 
 	// Found.
 	req := httptest.NewRequest(http.MethodGet, "/raft/kv/lang", nil)

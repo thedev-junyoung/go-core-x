@@ -24,6 +24,7 @@ package chaos_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -427,6 +428,107 @@ func TestChaos_SingleNodeMode(t *testing.T) {
 		t.Errorf("network errors in single-node mode: %d", result.NetworkErrors)
 	}
 	_ = ctx
+}
+
+// TestChaos_LinearizableRead validates the ReadIndex protocol under network partition.
+//
+// Scenario (ADR-019 correctness validation):
+//
+//  1. Start 3-node cluster. Wait for leader election.
+//  2. Write key="balance", value="100" via Raft consensus (to leader).
+//  3. Kill 2 follower nodes — leader can no longer form a quorum.
+//  4. Send GET /raft/kv/balance to the isolated (former) leader.
+//  5. Expected: 503 Service Unavailable (ReadIndex timeout, no quorum).
+//     The isolated node must NOT return "100" (stale read = linearizability violation).
+//
+// This test would have FAILED before ReadIndex was implemented (the old
+// code returned stale in-memory data without quorum confirmation).
+func TestChaos_LinearizableRead(t *testing.T) {
+	bin := requireBinary(t)
+	tmpDir := t.TempDir()
+	ctx := context.Background()
+
+	nodes := defaultNodeConfigs(tmpDir)
+	cl := chaos.NewCluster(bin, tmpDir+"/logs", nodes)
+	defer cl.StopAll()
+
+	t.Log("Starting 3-node cluster...")
+	if err := cl.Start(ctx); err != nil {
+		t.Fatalf("cluster start: %v", err)
+	}
+
+	// Step 1: Wait for a leader to be elected.
+	t.Log("Waiting for leader election...")
+	leaderID := cl.WaitForLeader(ctx, 15*time.Second)
+	if leaderID == "" {
+		t.Fatal("no leader elected within 15s")
+	}
+	t.Logf("Leader: %s", leaderID)
+
+	// Step 2: Write key via the leader.
+	t.Logf("Writing balance=100 via leader (%s)...", leaderID)
+	code, err := cl.RaftKVSet(leaderID, "balance", "100")
+	if err != nil {
+		t.Fatalf("RaftKVSet: %v", err)
+	}
+	if code != http.StatusNoContent && code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("RaftKVSet returned unexpected status: %d", code)
+	}
+
+	// Verify the write is visible from the leader before partitioning.
+	val, code, err := cl.RaftKVGet(leaderID, "balance")
+	if err != nil {
+		t.Fatalf("pre-partition GET: %v", err)
+	}
+	if code != http.StatusOK || val != "100" {
+		t.Fatalf("pre-partition GET: expected 200/\"100\", got %d/%q", code, val)
+	}
+	t.Log("Pre-partition read: PASS (balance=100)")
+
+	// Step 3: Kill all non-leader nodes to isolate the leader.
+	killedCount := 0
+	for _, n := range nodes {
+		if n.ID == leaderID {
+			continue
+		}
+		t.Logf("Killing %s (non-leader)...", n.ID)
+		if err := cl.KillNode(n.ID); err != nil {
+			t.Fatalf("kill %s: %v", n.ID, err)
+		}
+		killedCount++
+	}
+	t.Logf("Killed %d non-leader nodes. Leader (%s) is now isolated.", killedCount, leaderID)
+
+	// Give the leader time to attempt a heartbeat and discover it cannot form quorum.
+	// ReadIndex's confirmLeadership will time out.
+	time.Sleep(1 * time.Second)
+
+	// Step 4: Send GET to the isolated (former) leader.
+	// With ReadIndex: the leader must fail to confirm quorum and return 503.
+	// Without ReadIndex (old code): the leader would return "100" (stale read).
+	t.Logf("Sending GET /raft/kv/balance to isolated leader (%s)...", leaderID)
+	val, code, err = cl.RaftKVGet(leaderID, "balance")
+	if err != nil {
+		// Network error is acceptable (leader may have restarted election and is not listening).
+		t.Logf("GET returned network error: %v (acceptable)", err)
+		return
+	}
+
+	// Step 5: Assert linearizability.
+	switch code {
+	case http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		t.Logf("PASS: Isolated leader returned %d (not stale data). Linearizability preserved.", code)
+	case http.StatusTemporaryRedirect:
+		// Leader redirected — acceptable if it knows it's no longer leader.
+		t.Logf("PASS: Isolated leader returned 307 redirect. Linearizability preserved.")
+	case http.StatusOK:
+		// This is the FAILURE case: stale read returned.
+		t.Errorf("FAIL: Isolated leader returned 200 with value=%q. "+
+			"This is a LINEARIZABILITY VIOLATION — stale data was served without quorum confirmation.", val)
+	default:
+		t.Logf("INFO: Isolated leader returned unexpected status %d (value=%q). "+
+			"Acceptable if no stale data was served.", code, val)
+	}
 }
 
 // --- helpers ---

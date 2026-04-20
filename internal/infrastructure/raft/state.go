@@ -2,7 +2,20 @@
 // log replication, and write path).
 package raft
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// Sentinel errors for Raft operations.
+var (
+	// ErrNotLeader is returned by ReadIndex when the node is not the current leader.
+	ErrNotLeader = errors.New("raft: not leader")
+
+	// ErrReadIndexTimeout is returned by ReadIndex when the quorum heartbeat
+	// confirmation round does not complete before the context deadline.
+	ErrReadIndexTimeout = errors.New("raft: read index confirmation timed out")
+)
 
 // RaftRole represents the current Raft state of a node.
 type RaftRole int32
@@ -42,4 +55,9 @@ const (
 	ElectionTimeoutMax = 300 * time.Millisecond
 	HeartbeatInterval  = 50 * time.Millisecond
 	applyPollInterval  = 5 * time.Millisecond
+
+	// leaseDuration is the validity window granted to a leader lease after a
+	// quorum of heartbeat acknowledgments. Must be < ElectionTimeoutMin to
+	// guarantee that a stale leader's lease expires before a new leader is elected.
+	leaseDuration = 130 * time.Millisecond
 )
