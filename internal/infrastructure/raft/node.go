@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -90,6 +91,15 @@ type RaftNode struct {
 	// Protected by snapBufMu (separate from mu to avoid holding mu across chunk I/O).
 	snapBufMu sync.Mutex
 	snapBuf   []byte
+
+	// Lease Read state — protected by mu.
+	//
+	// leaseExpiry is the monotonic deadline until which this leader's lease is valid.
+	// Zero value means no active lease.
+	leaseExpiry time.Time
+	// leaseEnabled is set at construction from CORE_X_RAFT_LEASE_READ env var.
+	// Immutable after init; safe to read without mu.
+	leaseEnabled bool
 }
 
 // NewRaftNode creates a RaftNode. peers may be nil for single-node or test use.
@@ -99,13 +109,14 @@ type RaftNode struct {
 // restores log entries from the store before Run() is called.
 func NewRaftNode(id string, peers *PeerClients, meta MetaStore, logStore LogStore) *RaftNode {
 	n := &RaftNode{
-		id:       id,
-		peers:    peers,
-		role:     RoleFollower,
-		meta:     meta,
-		logStore: logStore,
-		applyCh:  make(chan LogEntry, 256),
-		resetCh:  make(chan struct{}, 1),
+		id:           id,
+		peers:        peers,
+		role:         RoleFollower,
+		meta:         meta,
+		logStore:     logStore,
+		applyCh:      make(chan LogEntry, 256),
+		resetCh:      make(chan struct{}, 1),
+		leaseEnabled: os.Getenv("CORE_X_RAFT_LEASE_READ") == "true",
 	}
 	if meta != nil {
 		if m, err := meta.Load(); err != nil {
@@ -292,6 +303,7 @@ func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesResu
 		}
 	}
 	n.role = RoleFollower
+	n.leaseExpiry = time.Time{} // invalidate lease on step-down
 	n.leaderID = args.LeaderID
 
 	// Signal the run loop to reset the election timer (non-blocking).
@@ -409,6 +421,7 @@ func (n *RaftNode) HandleRequestVote(term int64, candidateID string, lastLogInde
 		n.currentTerm = term
 		n.votedFor = ""
 		n.role = RoleFollower
+		n.leaseExpiry = time.Time{} // invalidate lease on step-down
 		if n.meta != nil {
 			if err := n.meta.Save(RaftMeta{Term: term, VotedFor: ""}); err != nil {
 				slog.Warn("raft: failed to persist term update from RequestVote", "err", err)
@@ -627,6 +640,7 @@ func (n *RaftNode) HandleInstallSnapshot(args InstallSnapshotArgs) InstallSnapsh
 		n.currentTerm = args.Term
 		n.votedFor = ""
 		n.role = RoleFollower
+		n.leaseExpiry = time.Time{} // invalidate lease on step-down
 		if n.meta != nil {
 			if err := n.meta.Save(RaftMeta{Term: args.Term, VotedFor: ""}); err != nil {
 				slog.Warn("raft: install snapshot: failed to persist term step-down", "err", err)
@@ -634,6 +648,7 @@ func (n *RaftNode) HandleInstallSnapshot(args InstallSnapshotArgs) InstallSnapsh
 		}
 	}
 	n.role = RoleFollower
+	n.leaseExpiry = time.Time{} // invalidate lease on step-down (unconditional)
 	n.leaderID = args.LeaderID
 
 	// Reset election timer (non-blocking).
@@ -1098,6 +1113,7 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 			// AppendEntries from valid Leader: step down.
 			n.mu.Lock()
 			n.role = RoleFollower
+			n.leaseExpiry = time.Time{} // invalidate lease on step-down
 			n.mu.Unlock()
 			slog.Info("raft: stepping down during election (heard from leader)", "id", n.id)
 			return
@@ -1112,6 +1128,7 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 				n.currentTerm = res.term
 				n.votedFor = ""
 				n.role = RoleFollower
+				n.leaseExpiry = time.Time{} // invalidate lease on step-down
 				n.mu.Unlock()
 				slog.Info("raft: stepping down (higher term in vote response)", "id", n.id, "term", res.term)
 				return
@@ -1153,6 +1170,9 @@ func (n *RaftNode) runLeader(ctx context.Context) {
 		}
 	}
 	n.leaderID = n.id
+	// Clear any lease carried over from a prior term — a newly elected leader
+	// has not yet proven its leadership via a quorum heartbeat round.
+	n.leaseExpiry = time.Time{}
 	n.mu.Unlock()
 
 	slog.Info("raft: became leader", "id", n.id, "term", term)
@@ -1232,6 +1252,11 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 	// snapshotIdx is captured here to avoid repeated lock acquisitions inside
 	// the goroutines spawned for snapshot sends below.
 	snapshotIdx := n.snapshotIndex
+	// snapshotPeerCount tracks peers routed to sendSnapshot instead of AppendEntries.
+	// A snapshot peer has not acknowledged leadership for this round, so lease
+	// renewal must be suppressed when any snapshot peer exists — we cannot form
+	// a true quorum of AppendEntries ACKs if some peers are bypassed.
+	snapshotPeerCount := 0
 
 	for _, peer := range peers {
 		ni := n.nextIndex[peer.addr]
@@ -1241,6 +1266,7 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 			// Launch snapshot goroutine; do not add to sends (no AppendEntries needed).
 			peerAddr := peer.addr
 			go n.sendSnapshot(peerAddr)
+			snapshotPeerCount++
 			continue
 		}
 
@@ -1295,6 +1321,9 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 
 	total := len(peers) + 1 // +1 for self
 	majority := total/2 + 1
+	// ackCount tracks successful heartbeat responses (self always counts as 1).
+	// Used to update the leader lease when a quorum is reached.
+	ackCount := 1
 
 	// Only collect responses from peers that got AppendEntries (sends).
 	// Peers that were routed to sendSnapshot do not write to ch.
@@ -1313,6 +1342,7 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 					n.votedFor = ""
 				}
 				n.role = RoleFollower
+				n.leaseExpiry = time.Time{} // invalidate lease on step-down
 				n.mu.Unlock()
 				slog.Info("raft: leader stepping down (higher term in heartbeat response)",
 					"id", n.id, "new_term", res.respTerm)
@@ -1332,6 +1362,17 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 				// §5.4.2: advance commitIndex if a quorum has replicated an
 				// entry from the currentTerm.
 				n.maybeAdvanceCommitIndex(term, lastIdx, majority)
+
+				// Lease Read: count successful ACKs (self is already 1 in ackCount).
+				// Renew lease once on first quorum crossing per heartbeat round,
+				// but only when no peer was routed to sendSnapshot. A snapshot
+				// peer did not acknowledge AppendEntries, so the majority count
+				// is computed over a reduced set — granting a lease would mean
+				// a peer whose log state is unknown has been silently included.
+				ackCount++
+				if n.leaseEnabled && snapshotPeerCount == 0 && ackCount == majority {
+					n.leaseExpiry = time.Now().Add(leaseDuration)
+				}
 			} else {
 				// Fast Backup: jump nextIndex using conflictIndex/conflictTerm.
 				ci := res.resp.ConflictIndex
@@ -1394,4 +1435,123 @@ func (n *RaftNode) maybeAdvanceCommitIndex(currentTerm, lastIdx int64, majority 
 			break
 		}
 	}
+}
+
+// confirmLeadership sends heartbeat AppendEntries to all peers and returns true
+// if a quorum (including self) responds successfully before ctx expires.
+//
+// This is the quorum heartbeat round required by the ReadIndex protocol (§6.4,
+// Ongaro PhD thesis) to prove the leader has not been superseded.
+//
+// Must NOT be called with mu held.
+func (n *RaftNode) confirmLeadership(ctx context.Context, term int64) bool {
+	var peers []*RaftClient
+	if n.peers != nil {
+		peers = n.peers.All()
+	}
+
+	total := len(peers) + 1 // +1 for self
+	majority := total/2 + 1
+
+	// Single-node fast path: self is always a quorum of one.
+	if len(peers) == 0 {
+		return true
+	}
+
+	type result struct{ ok bool }
+	ch := make(chan result, len(peers))
+
+	// Snapshot the heartbeat args while not holding mu.
+	n.mu.Lock()
+	prevIdx, prevTerm := n.lastEntry()
+	leaderCommit := n.commitIndex
+	leaderID := n.id
+	n.mu.Unlock()
+
+	args := AppendEntriesArgs{
+		Term:         term,
+		LeaderID:     leaderID,
+		PrevLogIndex: prevIdx,
+		PrevLogTerm:  prevTerm,
+		Entries:      nil, // heartbeat — no entries
+		LeaderCommit: leaderCommit,
+	}
+
+	for _, peer := range peers {
+		peer := peer
+		go func() {
+			resp, err := peer.AppendEntries(args)
+			if err != nil {
+				ch <- result{ok: false}
+				return
+			}
+			// Leadership confirmation requires only that the peer's term does
+			// not exceed ours. resp.Success may be false when the follower's
+			// log lags behind (prevLogIndex mismatch), but that does not
+			// invalidate our leadership — it means log repair is needed via
+			// normal replication, not that a new leader was elected.
+			ch <- result{ok: resp.Term <= term}
+		}()
+	}
+
+	// Self always counts.
+	successes := 1
+	collected := 0
+	for collected < len(peers) {
+		select {
+		case <-ctx.Done():
+			return successes >= majority
+		case res := <-ch:
+			collected++
+			if res.ok {
+				successes++
+			}
+			// Early exit once quorum is reached.
+			if successes >= majority {
+				return true
+			}
+		}
+	}
+	return successes >= majority
+}
+
+// ReadIndex confirms leadership and returns the commitIndex that the state
+// machine must apply before serving a linearizable read (ADR-019).
+//
+// Invariants:
+//   - INV-RI1: Returns ErrNotLeader immediately if not the current leader.
+//   - INV-RI2: The returned index is captured *before* the quorum round,
+//     ensuring any entry committed before this call is visible to the reader
+//     once the state machine catches up to the returned index.
+//   - INV-RI3: With lease enabled and a valid lease, skips the quorum round
+//     (Lease Read fast path). The lease window (leaseDuration) is strictly
+//     less than ElectionTimeoutMin, so no new leader can be elected while
+//     the lease is valid.
+//
+// Returns ErrNotLeader when this node is not the current Raft leader.
+// Returns ErrReadIndexTimeout when the quorum confirmation round does not
+// complete before ctx is cancelled.
+func (n *RaftNode) ReadIndex(ctx context.Context) (uint64, error) {
+	n.mu.Lock()
+	if n.role != RoleLeader {
+		n.mu.Unlock()
+		return 0, ErrNotLeader
+	}
+	// Capture commitIndex before releasing the lock so the quorum round
+	// proves leadership at least up to this point.
+	capturedCommitIndex := uint64(n.commitIndex)
+
+	// Lease Read fast path (ADR-019): skip heartbeat if lease is still valid.
+	if n.leaseEnabled && time.Now().Before(n.leaseExpiry) {
+		n.mu.Unlock()
+		return capturedCommitIndex, nil
+	}
+	term := n.currentTerm
+	n.mu.Unlock()
+
+	// Quorum heartbeat round: proves this leader is still authoritative.
+	if !n.confirmLeadership(ctx, term) {
+		return 0, ErrReadIndexTimeout
+	}
+	return capturedCommitIndex, nil
 }

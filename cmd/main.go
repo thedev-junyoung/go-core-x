@@ -563,7 +563,7 @@ func main() {
 	if raftNode != nil && raftKVSM != nil {
 		raftAddrMap := parseRaftHTTPNodes(raftHTTPNodes)
 		mux.Handle("POST /raft/kv", infrahttp.NewProposeHandler(raftNode, raftKVSM, raftAddrMap))
-		mux.Handle("GET /raft/kv/{key}", infrahttp.NewRaftKVGetHandler(raftKVSM))
+		mux.Handle("GET /raft/kv/{key}", infrahttp.NewRaftKVGetHandler(raftNode, raftKVSM, raftAddrMap))
 	}
 
 	// --- HTTP 서버 (HTTP Server) ---------------------------------------------

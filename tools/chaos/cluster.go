@@ -18,6 +18,7 @@ package chaos
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -190,6 +191,85 @@ func (c *Cluster) SendIngest(nodeID, source, payload string) (int, error) {
 	}
 	resp.Body.Close()
 	return resp.StatusCode, nil
+}
+
+// RaftKVSet sends POST /raft/kv to the named node to set a key-value pair.
+// Returns the HTTP status code (or 0 on network error).
+func (c *Cluster) RaftKVSet(nodeID, key, value string) (int, error) {
+	n := c.findNode(nodeID)
+	if n == nil {
+		return 0, fmt.Errorf("chaos: node %s not found", nodeID)
+	}
+	url := "http://" + n.Config.HTTPAddr + "/raft/kv"
+	body := fmt.Sprintf(`{"key":%q,"value":%q}`, key, value)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// RaftKVGet sends GET /raft/kv/{key} to the named node.
+// Returns the value, HTTP status code, and any network error.
+func (c *Cluster) RaftKVGet(nodeID, key string) (string, int, error) {
+	n := c.findNode(nodeID)
+	if n == nil {
+		return "", 0, fmt.Errorf("chaos: node %s not found", nodeID)
+	}
+	url := "http://" + n.Config.HTTPAddr + "/raft/kv/" + key
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", resp.StatusCode, nil
+	}
+	var result struct {
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", resp.StatusCode, fmt.Errorf("decode error: %w", err)
+	}
+	return result.Value, resp.StatusCode, nil
+}
+
+// WaitForLeader polls all nodes to find which one is the leader.
+// Returns the nodeID of the current leader, or "" if none found within timeout.
+func (c *Cluster) WaitForLeader(ctx context.Context, timeout time.Duration) string {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ""
+		default:
+		}
+		for _, n := range c.nodes {
+			// Try a write; only the leader will accept it (204).
+			// Followers redirect (307) or return 503.
+			url := "http://" + n.Config.HTTPAddr + "/raft/kv"
+			body := strings.NewReader(`{"key":"__leader_probe__","value":"probe"}`)
+			client := &http.Client{
+				Timeout: 500 * time.Millisecond,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse // don't follow redirects
+				},
+			}
+			resp, err := client.Post(url, "application/json", body)
+			if err != nil {
+				continue
+			}
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+				return n.Config.ID
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return ""
 }
 
 // NodeLogPath returns the log file path for the named node.
