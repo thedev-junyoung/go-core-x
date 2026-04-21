@@ -16,19 +16,34 @@ import (
 	"time"
 )
 
+// snapshotConfigKey is a reserved KV key used to embed ClusterConfig in the
+// snapshot body. It is prefixed with NUL to avoid collision with real KV keys
+// (KV keys are user-supplied strings; a NUL prefix is not a valid key).
+const snapshotConfigKey = "\x00__raft_cluster_config__"
+
 // SnapshotData is the serialisable snapshot of the KV state machine.
 // The KV map is a private copy; mutations after TakeSnapshot are safe.
+//
+// Config holds the active ClusterConfig at snapshot time. It is embedded in
+// the snapshot body via a reserved key (snapshotConfigKey) so that the on-disk
+// format is unchanged — no header version bump needed.
 type SnapshotData struct {
-	KV map[string]string
+	KV     map[string]string
+	Config ClusterConfig // restored from snapshotConfigKey on Load
 }
 
 // SnapshotMeta identifies a snapshot file.
+//
+// ClusterConfig is included to prevent split-brain after snapshot restore:
+// without it, a node restarting from snapshot would revert to static peers
+// config, which may be a different quorum from the one that committed the snapshot.
 type SnapshotMeta struct {
-	Index     int64     // last included Raft log index
-	Term      int64     // term of the last included entry
-	CreatedAt time.Time // wall-clock time at creation (informational)
-	Size      int64     // on-disk file size in bytes (set by Save; 0 before Save)
-	CRC32     uint32    // checksum of Header+Body (set by Save; 0 before Save)
+	Index         int64         // last included Raft log index
+	Term          int64         // term of the last included entry
+	CreatedAt     time.Time     // wall-clock time at creation (informational)
+	Size          int64         // on-disk file size in bytes (set by Save; 0 before Save)
+	CRC32         uint32        // checksum of Header+Body (set by Save; 0 before Save)
+	ClusterConfig ClusterConfig // active membership config at snapshot time (ADR-020 §Safety)
 }
 
 // Snapshotable is the interface a state machine must implement to support

@@ -15,6 +15,11 @@ var (
 	// ErrReadIndexTimeout is returned by ReadIndex when the quorum heartbeat
 	// confirmation round does not complete before the context deadline.
 	ErrReadIndexTimeout = errors.New("raft: read index confirmation timed out")
+
+	// ErrConfigChangeInProgress is returned by ProposeConfigChange when a
+	// membership change is already underway (cluster is in joint phase).
+	// Callers must wait for the current change to complete before retrying.
+	ErrConfigChangeInProgress = errors.New("raft: config change already in progress")
 )
 
 // RaftRole represents the current Raft state of a node.

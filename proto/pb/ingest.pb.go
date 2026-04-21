@@ -495,11 +495,14 @@ func (x *InstallSnapshotResponse) GetTerm() int64 {
 }
 
 // LogEntry is a single Raft log record (§5.3).
+// Phase 11 (ADR-020): added entry_type field for config-change entries.
+// Zero value (0) = command entry (backward compatible with Phase ≤10 wire format).
 type LogEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Index         int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"` // 1-based log position
-	Term          int64                  `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`   // term when the entry was received by the leader
-	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`    // opaque command payload
+	Index         int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`                          // 1-based log position
+	Term          int64                  `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`                            // term when the entry was received by the leader
+	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`                             // opaque command payload
+	EntryType     uint32                 `protobuf:"varint,4,opt,name=entry_type,json=entryType,proto3" json:"entry_type,omitempty"` // EntryType: 0=command, 1=config (ADR-020)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -553,6 +556,13 @@ func (x *LogEntry) GetData() []byte {
 		return x.Data
 	}
 	return nil
+}
+
+func (x *LogEntry) GetEntryType() uint32 {
+	if x != nil {
+		return x.EntryType
+	}
+	return 0
 }
 
 // RequestVoteRequest is sent by a Candidate to each peer.
@@ -870,11 +880,13 @@ const file_ingest_proto_rawDesc = "" +
 	"\x04data\x18\x06 \x01(\fR\x04data\x12\x12\n" +
 	"\x04done\x18\a \x01(\bR\x04done\"-\n" +
 	"\x17InstallSnapshotResponse\x12\x12\n" +
-	"\x04term\x18\x01 \x01(\x03R\x04term\"H\n" +
+	"\x04term\x18\x01 \x01(\x03R\x04term\"g\n" +
 	"\bLogEntry\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x12\n" +
 	"\x04term\x18\x02 \x01(\x03R\x04term\x12\x12\n" +
-	"\x04data\x18\x03 \x01(\fR\x04data\"\x95\x01\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\x12\x1d\n" +
+	"\n" +
+	"entry_type\x18\x04 \x01(\rR\tentryType\"\x95\x01\n" +
 	"\x12RequestVoteRequest\x12\x12\n" +
 	"\x04term\x18\x01 \x01(\x03R\x04term\x12!\n" +
 	"\fcandidate_id\x18\x02 \x01(\tR\vcandidateId\x12$\n" +

@@ -560,10 +560,12 @@ func main() {
 	})
 
 	// Phase 6/7: Raft KV endpoints — only registered when Raft is active.
+	// Phase 11 (ADR-020): POST /raft/config for dynamic membership changes.
 	if raftNode != nil && raftKVSM != nil {
 		raftAddrMap := parseRaftHTTPNodes(raftHTTPNodes)
 		mux.Handle("POST /raft/kv", infrahttp.NewProposeHandler(raftNode, raftKVSM, raftAddrMap))
 		mux.Handle("GET /raft/kv/{key}", infrahttp.NewRaftKVGetHandler(raftNode, raftKVSM, raftAddrMap))
+		mux.Handle("POST /raft/config", infrahttp.NewConfigHandler(raftNode, raftAddrMap))
 	}
 
 	// --- HTTP 서버 (HTTP Server) ---------------------------------------------
