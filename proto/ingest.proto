@@ -89,10 +89,13 @@ message InstallSnapshotResponse {
 }
 
 // LogEntry is a single Raft log record (§5.3).
+// Phase 11 (ADR-020): added entry_type field for config-change entries.
+// Zero value (0) = command entry (backward compatible with Phase ≤10 wire format).
 message LogEntry {
-  int64 index = 1; // 1-based log position
-  int64 term  = 2; // term when the entry was received by the leader
-  bytes data  = 3; // opaque command payload
+  int64  index      = 1; // 1-based log position
+  int64  term       = 2; // term when the entry was received by the leader
+  bytes  data       = 3; // opaque command payload
+  uint32 entry_type = 4; // EntryType: 0=command, 1=config (ADR-020)
 }
 
 // RequestVoteRequest is sent by a Candidate to each peer.

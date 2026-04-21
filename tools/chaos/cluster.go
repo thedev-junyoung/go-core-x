@@ -211,6 +211,31 @@ func (c *Cluster) RaftKVSet(nodeID, key, value string) (int, error) {
 	return resp.StatusCode, nil
 }
 
+// RaftConfigChange sends POST /raft/config to the named node.
+// action is "add" or "remove"; grpcAddrs is the list of peer gRPC addresses.
+// Uses a long timeout (40s) because joint-consensus round-trip can take 2 log commits.
+// Returns the HTTP status code (or 0 on network error).
+func (c *Cluster) RaftConfigChange(nodeID, action string, grpcAddrs []string) (int, error) {
+	n := c.findNode(nodeID)
+	if n == nil {
+		return 0, fmt.Errorf("chaos: node %s not found", nodeID)
+	}
+	url := "http://" + n.Config.HTTPAddr + "/raft/config"
+	// Build JSON manually to avoid importing encoding/json in this file.
+	nodeList := make([]string, len(grpcAddrs))
+	for i, a := range grpcAddrs {
+		nodeList[i] = fmt.Sprintf("%q", a)
+	}
+	body := fmt.Sprintf(`{"action":%q,"nodes":[%s]}`, action, strings.Join(nodeList, ","))
+	client := &http.Client{Timeout: 40 * time.Second}
+	resp, err := client.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
 // RaftKVGet sends GET /raft/kv/{key} to the named node.
 // Returns the value, HTTP status code, and any network error.
 func (c *Cluster) RaftKVGet(nodeID, key string) (string, int, error) {

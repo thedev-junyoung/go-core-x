@@ -287,36 +287,115 @@ func (s *WALLogStore) Close() error {
 
 // --- Encoding helpers -------------------------------------------------------
 
+// walEntryMagic is a 2-byte sentinel prefixed to all v3+ WAL entry payloads.
+// 0xFF and 0xC0 are not valid UTF-8 lead bytes, so they cannot appear at the
+// start of a v1 JSON-encoded command (which is always valid UTF-8).
+// This eliminates the length-based false-positive risk from the v1/v2 heuristic.
+const (
+	walEntryMagic0 = byte(0xFF)
+	walEntryMagic1 = byte(0xC0)
+)
+
 // encodeLogEntry serialises a LogEntry into a WAL payload.
-// Format: [0x01][Index:8 LE][Term:8 LE][DataLen:4 LE][Data:N]
+//
+// Format (v3, Phase 12):
+//
+//	[0x01][0xFF][0xC0][Index:8 LE][Term:8 LE][EntryType:1][DataLen:4 LE][Data:N]
+//
+// The 0xFF 0xC0 magic sentinel was added in Phase 12 to replace the fragile
+// length-based v1/v2 heuristic. v1 and v2 files written by earlier binaries are
+// still decoded by decodeLogEntry via a backward-compat fallback path.
 func encodeLogEntry(e LogEntry) []byte {
 	dataLen := len(e.Data)
-	buf := make([]byte, 1+8+8+4+dataLen)
+	// v3: 1 (record type) + 2 (magic) + 8 (index) + 8 (term) + 1 (entry type) + 4 (datalen) + N (data)
+	buf := make([]byte, 1+2+8+8+1+4+dataLen)
 	buf[0] = logRecordTypeEntry
-	binary.LittleEndian.PutUint64(buf[1:9], uint64(e.Index))
-	binary.LittleEndian.PutUint64(buf[9:17], uint64(e.Term))
-	binary.LittleEndian.PutUint32(buf[17:21], uint32(dataLen))
-	copy(buf[21:], e.Data)
+	buf[1] = walEntryMagic0 // magic sentinel byte 0
+	buf[2] = walEntryMagic1 // magic sentinel byte 1
+	binary.LittleEndian.PutUint64(buf[3:11], uint64(e.Index))
+	binary.LittleEndian.PutUint64(buf[11:19], uint64(e.Term))
+	buf[19] = byte(e.Type) // EntryType byte
+	binary.LittleEndian.PutUint32(buf[20:24], uint32(dataLen))
+	copy(buf[24:], e.Data)
 	return buf
 }
 
-// decodeLogEntry deserialises the payload after the type byte.
+// decodeLogEntry deserialises the payload after the leading record-type byte.
+//
+// Three on-disk formats are supported for backward compatibility:
+//
+//	v1 (Phase ≤10): [Index:8][Term:8][DataLen:4][Data:N]              — 20 bytes header
+//	v2 (Phase 11):  [Index:8][Term:8][EntryType:1][DataLen:4][Data:N] — 21 bytes header
+//	v3 (Phase 12+): [0xFF][0xC0][Index:8][Term:8][EntryType:1][DataLen:4][Data:N] — 23 bytes header
+//
+// Detection:
+//   - v3: first two bytes are the magic sentinel [0xFF, 0xC0].
+//   - v2: length heuristic — if DataLen at v2 offset equals len(data)-21, treat as v2.
+//   - v1: fallback.
 func decodeLogEntry(data []byte) (LogEntry, error) {
-	if len(data) < 20 {
+	const v1Header = 20 // 8+8+4
+	const v2Header = 21 // 8+8+1+4
+	const v3Header = 23 // 2(magic)+8+8+1+4
+
+	if len(data) == 0 {
+		return LogEntry{}, fmt.Errorf("entry payload too short: 0 bytes")
+	}
+
+	// --- v3: magic bytes present ---
+	if len(data) >= 2 && data[0] == walEntryMagic0 && data[1] == walEntryMagic1 {
+		if len(data) < v3Header {
+			return LogEntry{}, fmt.Errorf("v3 entry payload too short: %d bytes", len(data))
+		}
+		index := int64(binary.LittleEndian.Uint64(data[2:10]))
+		term := int64(binary.LittleEndian.Uint64(data[10:18]))
+		entryType := EntryType(data[18])
+		dataLen := int(binary.LittleEndian.Uint32(data[19:23]))
+		if len(data) != v3Header+dataLen {
+			return LogEntry{}, fmt.Errorf("v3 entry length mismatch: header says %d bytes, got %d", v3Header+dataLen, len(data))
+		}
+		var payload []byte
+		if dataLen > 0 {
+			payload = make([]byte, dataLen)
+			copy(payload, data[23:23+dataLen])
+		}
+		return LogEntry{Index: index, Term: term, Type: entryType, Data: payload}, nil
+	}
+
+	// --- v1/v2 legacy path ---
+	if len(data) < v1Header {
 		return LogEntry{}, fmt.Errorf("entry payload too short: %d bytes", len(data))
 	}
+
 	index := int64(binary.LittleEndian.Uint64(data[0:8]))
 	term := int64(binary.LittleEndian.Uint64(data[8:16]))
+
+	// Attempt v2 decode.
+	if len(data) >= v2Header {
+		entryType := EntryType(data[16])
+		dataLen := int(binary.LittleEndian.Uint32(data[17:21]))
+		if len(data) == v2Header+dataLen {
+			// v2 format confirmed by length heuristic.
+			var payload []byte
+			if dataLen > 0 {
+				payload = make([]byte, dataLen)
+				copy(payload, data[21:21+dataLen])
+			}
+			return LogEntry{Index: index, Term: term, Type: entryType, Data: payload}, nil
+		}
+	}
+
+	// Fall back to v1 format.
 	dataLen := int(binary.LittleEndian.Uint32(data[16:20]))
-	if len(data) < 20+dataLen {
-		return LogEntry{}, fmt.Errorf("entry data too short: need %d got %d", 20+dataLen, len(data))
+	if len(data) < v1Header+dataLen {
+		return LogEntry{}, fmt.Errorf("entry data too short: need %d got %d", v1Header+dataLen, len(data))
 	}
 	var payload []byte
 	if dataLen > 0 {
 		payload = make([]byte, dataLen)
 		copy(payload, data[20:20+dataLen])
 	}
-	return LogEntry{Index: index, Term: term, Data: payload}, nil
+	// v1 entries are always EntryTypeCommand (zero value).
+	return LogEntry{Index: index, Term: term, Type: EntryTypeCommand, Data: payload}, nil
 }
 
 // encodeTruncate serialises a truncation marker.

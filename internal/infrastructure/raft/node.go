@@ -2,6 +2,8 @@ package raft
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"os"
@@ -12,12 +14,33 @@ import (
 	pb "github.com/junyoung/core-x/proto/pb"
 )
 
+// configChangeTimeout is the maximum time ProposeConfigChange waits for a
+// config-change phase (A or B) to commit. 30 seconds is generous: under normal
+// conditions a 3-node cluster commits within a single heartbeat round (~50ms).
+const configChangeTimeout = 30 * time.Second
+
+// EntryType distinguishes regular commands from config-change entries.
+// Zero value (EntryTypeCommand) preserves backward compatibility: all existing
+// log entries on disk were written without a Type byte and default to 0.
+type EntryType uint8
+
+const (
+	// EntryTypeCommand is the default: a KV set/del command.
+	EntryTypeCommand EntryType = 0
+	// EntryTypeConfig is a cluster membership change entry (ADR-020).
+	EntryTypeConfig EntryType = 1
+)
+
 // LogEntry is the in-memory representation of a Raft log record.
 // The on-wire format is pb.LogEntry; this avoids a proto heap allocation
 // on the hot read path inside HandleAppendEntries.
+//
+// Type is a new field (Phase 11 / ADR-020). Zero value = EntryTypeCommand,
+// preserving backward compatibility with existing WAL files.
 type LogEntry struct {
 	Index int64
 	Term  int64
+	Type  EntryType // zero-value = EntryTypeCommand (backward compatible)
 	Data  []byte
 }
 
@@ -100,6 +123,12 @@ type RaftNode struct {
 	// leaseEnabled is set at construction from CORE_X_RAFT_LEASE_READ env var.
 	// Immutable after init; safe to read without mu.
 	leaseEnabled bool
+
+	// clusterConfig is the active membership configuration (ADR-020).
+	// Updated immediately on append of an EntryTypeConfig entry (Raft §6):
+	// not on commit, on append. This prevents split-brain during the joint phase.
+	// Protected by mu.
+	clusterConfig ClusterConfig
 }
 
 // NewRaftNode creates a RaftNode. peers may be nil for single-node or test use.
@@ -108,6 +137,15 @@ type RaftNode struct {
 // logStore may be nil to disable log persistence. When non-nil, the node
 // restores log entries from the store before Run() is called.
 func NewRaftNode(id string, peers *PeerClients, meta MetaStore, logStore LogStore) *RaftNode {
+	// Build the initial stable ClusterConfig from the static peer list.
+	// The self node is NOT included in Voters (quorumFor always adds 1 for self).
+	var initialVoters []string
+	if peers != nil {
+		for addr := range peers.clients {
+			initialVoters = append(initialVoters, addr)
+		}
+	}
+
 	n := &RaftNode{
 		id:           id,
 		peers:        peers,
@@ -117,6 +155,10 @@ func NewRaftNode(id string, peers *PeerClients, meta MetaStore, logStore LogStor
 		applyCh:      make(chan LogEntry, 256),
 		resetCh:      make(chan struct{}, 1),
 		leaseEnabled: os.Getenv("CORE_X_RAFT_LEASE_READ") == "true",
+		clusterConfig: ClusterConfig{
+			Phase:  ConfigPhaseStable,
+			Voters: initialVoters,
+		},
 	}
 	if meta != nil {
 		if m, err := meta.Load(); err != nil {
@@ -132,6 +174,13 @@ func NewRaftNode(id string, peers *PeerClients, meta MetaStore, logStore LogStor
 			slog.Error("raft: failed to load persistent log, starting from empty log", "err", err)
 		} else {
 			n.log = entries
+			// Replay config entries to restore clusterConfig.
+			// applyConfigEntry requires mu (held conceptually — single-threaded init).
+			for _, e := range entries {
+				if e.Type == EntryTypeConfig {
+					n.applyConfigEntry(e)
+				}
+			}
 			slog.Info("raft: log restored from store", "entries", len(entries))
 		}
 	}
@@ -374,17 +423,24 @@ func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesResu
 		// Persist the new entry before updating in-memory log.
 		// If persist fails, the entry is in neither the WAL nor memory — consistent.
 		// Return failure so the leader retries; it will re-send this entry.
+		newEntry := LogEntry{
+			Index: pbEntry.Index,
+			Term:  pbEntry.Term,
+			Type:  EntryType(pbEntry.EntryType),
+			Data:  pbEntry.Data,
+		}
 		if n.logStore != nil {
-			if err := n.logStore.Append(LogEntry{Index: pbEntry.Index, Term: pbEntry.Term, Data: pbEntry.Data}); err != nil {
+			if err := n.logStore.Append(newEntry); err != nil {
 				slog.Error("raft: failed to persist log entry, rejecting AppendEntries", "err", err)
 				return AppendEntriesResult{Term: n.currentTerm, Success: false}
 			}
 		}
-		n.log = append(n.log, LogEntry{
-			Index: pbEntry.Index,
-			Term:  pbEntry.Term,
-			Data:  pbEntry.Data,
-		})
+		n.log = append(n.log, newEntry)
+		// Config entries take effect immediately on append (Raft §6: "as soon as
+		// the entry is appended to the log, not when it is committed").
+		if newEntry.Type == EntryTypeConfig {
+			n.applyConfigEntry(newEntry)
+		}
 	}
 
 	// §5.3: Advance commitIndex if leaderCommit is ahead.
@@ -545,12 +601,20 @@ func (n *RaftNode) maybeSnapshot() {
 		n.snapshotInProgress.Store(0)
 		return
 	}
+	// Capture the active ClusterConfig at snapshot time so that post-restore
+	// nodes recover the correct membership and do not revert to static peers.
+	// This prevents split-brain when WAL is compacted and config entries are gone.
+	capturedConfig := n.clusterConfig
 	n.mu.Unlock()
 
+	// Embed ClusterConfig into the snapshot data (stored under snapshotConfigKey).
+	data.Config = capturedConfig
+
 	meta := SnapshotMeta{
-		Index:     capturedIndex,
-		Term:      capturedTerm,
-		CreatedAt: time.Now(),
+		Index:         capturedIndex,
+		Term:          capturedTerm,
+		CreatedAt:     time.Now(),
+		ClusterConfig: capturedConfig,
 	}
 
 	go func() {
@@ -725,6 +789,16 @@ func (n *RaftNode) HandleInstallSnapshot(args InstallSnapshotArgs) InstallSnapsh
 	if n.lastApplied < args.LastIncludedIndex {
 		n.lastApplied = args.LastIncludedIndex
 	}
+	// INV-CC3: restore clusterConfig from snapshot so a follower that becomes
+	// leader after InstallSnapshot uses the correct quorum — not the stale
+	// pre-snapshot config.  Mirror the same nil-guard used in recoverFromSnapshot.
+	if data.Config.Voters != nil {
+		n.clusterConfig = data.Config
+		slog.Info("raft: install snapshot: clusterConfig restored",
+			"index", args.LastIncludedIndex,
+			"voters", data.Config.Voters,
+			"phase", data.Config.Phase)
+	}
 	n.mu.Unlock()
 
 	// Persist the received snapshot to disk so recovery after a crash works.
@@ -870,6 +944,18 @@ func (n *RaftNode) recoverFromSnapshot() int64 {
 	n.snapshotIndex = latestMeta.Index
 	n.snapshotTerm = latestMeta.Term
 
+	// Restore ClusterConfig from the snapshot so that post-restart quorum
+	// decisions use the correct membership (ADR-020 §Safety: snapshot must
+	// carry config state to survive WAL compaction of config entries).
+	// data.Config is zero if the snapshot was written by a pre-fix binary;
+	// in that case we leave clusterConfig as-is (initialised from WAL replay).
+	if data.Config.Voters != nil {
+		n.clusterConfig = data.Config
+		slog.Info("raft: cluster config restored from snapshot",
+			"index", latestMeta.Index, "voters", data.Config.Voters,
+			"phase", data.Config.Phase)
+	}
+
 	// Filter n.log: discard entries already covered by the snapshot.
 	// n.log was populated by NewRaftNode from the WAL before this call.
 	filtered := n.log[:0]
@@ -892,8 +978,8 @@ func (n *RaftNode) recoverFromSnapshot() int64 {
 	return latestMeta.Index
 }
 
-// Propose appends data to the leader's log and returns the assigned index and
-// term. Returns isLeader=false when this node is not the current leader;
+// Propose appends a KV command entry to the leader's log and returns the assigned
+// index and term. Returns isLeader=false when this node is not the current leader;
 // callers should redirect the request to the actual leader.
 //
 // The entry is persisted (fsync'd) to logStore before this method returns.
@@ -902,28 +988,340 @@ func (n *RaftNode) recoverFromSnapshot() int64 {
 func (n *RaftNode) Propose(data []byte) (index int64, term int64, isLeader bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	return n.proposeEntry(LogEntry{Type: EntryTypeCommand, Data: data})
+}
 
+// applyConfigEntry updates n.clusterConfig from a ConfigChangePayload encoded in entry.Data.
+// Called immediately after appending an EntryTypeConfig entry to n.log — on append,
+// not on commit (Raft §6 requirement: config change takes effect immediately on append).
+//
+// Must be called with mu held.
+func (n *RaftNode) applyConfigEntry(entry LogEntry) {
+	var payload ConfigChangePayload
+	if err := json.Unmarshal(entry.Data, &payload); err != nil {
+		slog.Error("raft: malformed config entry", "index", entry.Index, "err", err)
+		return
+	}
+	switch payload.Phase {
+	case "joint":
+		n.clusterConfig = ClusterConfig{
+			Phase:     ConfigPhaseJoint,
+			Voters:    payload.Voters,
+			NewVoters: payload.NewVoters,
+		}
+		slog.Info("raft: joint config active",
+			"old_voters", payload.Voters, "new_voters", payload.NewVoters)
+		// Expand PeerClients to include new voters not already connected.
+		// EnsureConnected is safe to call with mu held (uses its own lock).
+		if n.peers != nil {
+			n.peers.EnsureConnected(payload.NewVoters)
+		}
+		// Initialise nextIndex/matchIndex for newly added peers (leader-only).
+		// nextIndex is non-nil only when this node is the leader (set in runLeader).
+		// Without this, sendHeartbeats reads nextIndex[newPeer] = 0 → prevIdx = -1
+		// → protocol error (prevLogIndex must be >= 0).
+		if n.nextIndex != nil {
+			lastIdx, _ := n.lastEntry()
+			for _, addr := range payload.NewVoters {
+				if _, ok := n.nextIndex[addr]; !ok {
+					n.nextIndex[addr] = lastIdx + 1
+					n.matchIndex[addr] = 0
+				}
+			}
+		}
+	case "stable":
+		n.clusterConfig = ClusterConfig{
+			Phase:  ConfigPhaseStable,
+			Voters: payload.Voters,
+		}
+		slog.Info("raft: stable config active", "voters", payload.Voters)
+		// After stabilising, ensure all final voters are connected.
+		if n.peers != nil {
+			n.peers.EnsureConnected(payload.Voters)
+		}
+		// Defensively initialise nextIndex/matchIndex for any C_new voter that
+		// was not already in the leader's replication maps. In practice, the joint
+		// phase already does this; this guard protects against races or a future
+		// code path that skips Phase A.
+		if n.nextIndex != nil {
+			lastIdx, _ := n.lastEntry()
+			for _, addr := range payload.Voters {
+				if _, ok := n.nextIndex[addr]; !ok {
+					n.nextIndex[addr] = lastIdx + 1
+					n.matchIndex[addr] = 0
+				}
+			}
+		}
+	default:
+		slog.Error("raft: unknown config entry phase", "phase", payload.Phase, "index", entry.Index)
+	}
+}
+
+// proposeEntry appends a LogEntry to the leader's log (with WAL persistence)
+// and returns (index, term, isLeader). It is the internal variant of Propose
+// that accepts a pre-built LogEntry (including Type). Must be called with mu held.
+func (n *RaftNode) proposeEntry(entry LogEntry) (index int64, term int64, isLeader bool) {
 	if n.role != RoleLeader {
 		return 0, 0, false
 	}
-
 	lastIdx, _ := n.lastEntry()
-	newIndex := lastIdx + 1
-	entry := LogEntry{Index: newIndex, Term: n.currentTerm, Data: data}
+	entry.Index = lastIdx + 1
+	entry.Term = n.currentTerm
 
-	// Persist before in-memory append: same invariant as HandleAppendEntries.
-	// If persist fails, treat as non-leader so the caller retries or redirects.
 	if n.logStore != nil {
 		if err := n.logStore.Append(entry); err != nil {
-			slog.Error("raft: leader failed to persist proposed entry", "index", newIndex, "err", err)
+			slog.Error("raft: leader failed to persist entry", "index", entry.Index, "err", err)
 			return 0, 0, false
 		}
 	}
-
 	n.log = append(n.log, entry)
-	slog.Info("raft: entry proposed", "id", n.id, "index", newIndex, "term", n.currentTerm)
 
-	return newIndex, n.currentTerm, true
+	// Config entries take effect immediately on append (Raft §6).
+	if entry.Type == EntryTypeConfig {
+		n.applyConfigEntry(entry)
+	}
+
+	slog.Info("raft: entry proposed", "id", n.id, "index", entry.Index,
+		"term", n.currentTerm, "type", entry.Type)
+	return entry.Index, n.currentTerm, true
+}
+
+// waitForCommit blocks until commitIndex >= targetIndex or ctx is cancelled.
+// Must NOT be called with mu held.
+func (n *RaftNode) waitForCommit(ctx context.Context, targetIndex int64) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		n.mu.Lock()
+		committed := n.commitIndex >= targetIndex
+		n.mu.Unlock()
+		if committed {
+			return nil
+		}
+		// Poll at a fraction of HeartbeatInterval to minimise latency.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// ComputeNewVoters derives the new voter list from the current config and a delta.
+// action must be "add" or "remove"; nodes is the list of peer addresses to add/remove.
+// Returns ErrConfigChangeInProgress if the cluster is already in joint phase.
+// Must NOT be called with mu held.
+func (n *RaftNode) ComputeNewVoters(action string, nodes []string) ([]string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.clusterConfig.IsJoint() {
+		return nil, ErrConfigChangeInProgress
+	}
+
+	current := n.clusterConfig.Voters
+	switch action {
+	case "add":
+		seen := make(map[string]struct{}, len(current)+len(nodes))
+		result := make([]string, 0, len(current)+len(nodes))
+		for _, addr := range current {
+			if _, ok := seen[addr]; !ok {
+				seen[addr] = struct{}{}
+				result = append(result, addr)
+			}
+		}
+		for _, addr := range nodes {
+			if _, ok := seen[addr]; !ok {
+				seen[addr] = struct{}{}
+				result = append(result, addr)
+			}
+		}
+		return result, nil
+	case "remove":
+		remove := make(map[string]struct{}, len(nodes))
+		for _, addr := range nodes {
+			remove[addr] = struct{}{}
+		}
+		result := make([]string, 0, len(current))
+		for _, addr := range current {
+			if _, ok := remove[addr]; !ok {
+				result = append(result, addr)
+			}
+		}
+		return result, nil
+	default:
+		return nil, ErrConfigChangeInProgress
+	}
+}
+
+// ProposeConfigChange initiates a two-phase membership change (ADR-020).
+//
+// Phase A: proposes C_old,new (joint config entry) immediately.
+// Phase B: after C_old,new commits, proposes C_new (stable config entry).
+//
+// The returned channel receives the final applied index when Phase B commits.
+// If the channel is closed without sending, the change failed; the operator
+// should retry POST /raft/config.
+//
+// Must NOT be called with mu held.
+func (n *RaftNode) ProposeConfigChange(ctx context.Context, newVoters []string) (<-chan int64, error) {
+	n.mu.Lock()
+	if n.role != RoleLeader {
+		n.mu.Unlock()
+		return nil, ErrNotLeader
+	}
+	if n.clusterConfig.IsJoint() {
+		n.mu.Unlock()
+		return nil, ErrConfigChangeInProgress
+	}
+	oldVoters := make([]string, len(n.clusterConfig.Voters))
+	copy(oldVoters, n.clusterConfig.Voters)
+
+	// Phase A: propose C_old,new.
+	jointData, err := json.Marshal(ConfigChangePayload{
+		Phase:     "joint",
+		Voters:    oldVoters,
+		NewVoters: newVoters,
+	})
+	if err != nil {
+		n.mu.Unlock()
+		return nil, err
+	}
+	jointIndex, _, isLeader := n.proposeEntry(LogEntry{Type: EntryTypeConfig, Data: jointData})
+	n.mu.Unlock()
+
+	if !isLeader {
+		return nil, ErrNotLeader
+	}
+
+	done := make(chan int64, 1)
+
+	go func() {
+		// Wait for C_old,new to commit.
+		waitCtx, cancel := context.WithTimeout(ctx, configChangeTimeout)
+		defer cancel()
+
+		if err := n.waitForCommit(waitCtx, jointIndex); err != nil {
+			slog.Error("raft: joint config commit timed out or cancelled",
+				"joint_index", jointIndex, "err", err)
+			close(done)
+			return
+		}
+
+		// Phase B: propose C_new.
+		n.mu.Lock()
+		if n.role != RoleLeader {
+			n.mu.Unlock()
+			close(done)
+			return
+		}
+		stableData, err := json.Marshal(ConfigChangePayload{
+			Phase:  "stable",
+			Voters: newVoters,
+		})
+		if err != nil {
+			n.mu.Unlock()
+			close(done)
+			return
+		}
+		stableIndex, _, isLeader := n.proposeEntry(LogEntry{Type: EntryTypeConfig, Data: stableData})
+		n.mu.Unlock()
+
+		if !isLeader {
+			close(done)
+			return
+		}
+
+		waitCtx2, cancel2 := context.WithTimeout(ctx, configChangeTimeout)
+		defer cancel2()
+
+		if err := n.waitForCommit(waitCtx2, stableIndex); err != nil {
+			slog.Error("raft: stable config commit timed out or cancelled",
+				"stable_index", stableIndex, "err", err)
+			close(done)
+			return
+		}
+
+		// Check if this node was removed from C_new; if so, step down after commit.
+		n.mu.Lock()
+		removed := !n.containsSelf(newVoters)
+		if removed {
+			slog.Info("raft: leader removed from new config, stepping down",
+				"id", n.id, "new_voters", newVoters)
+			n.role = RoleFollower
+			n.leaseExpiry = time.Time{}
+		}
+		n.mu.Unlock()
+
+		done <- stableIndex
+	}()
+
+	return done, nil
+}
+
+// containsSelf reports whether newVoters contains n.id.
+// Must be called with mu held.
+func (n *RaftNode) containsSelf(newVoters []string) bool {
+	for _, addr := range newVoters {
+		if addr == n.id {
+			return true
+		}
+	}
+	return false
+}
+
+// proposeStableConfig proposes Phase B (C_new / stable) directly, bypassing the
+// IsJoint guard in ProposeConfigChange. It is used exclusively by the Phase B
+// auto-resume path in runLeader, which is called when the cluster is already
+// in a joint config — i.e. the IsJoint check must be skipped by design.
+//
+// Returns the committed stable index, or an error if this node is no longer
+// leader or the commit times out.
+//
+// Must NOT be called with mu held.
+func (n *RaftNode) proposeStableConfig(ctx context.Context, newVoters []string) (int64, error) {
+	stableData, err := json.Marshal(ConfigChangePayload{
+		Phase:  "stable",
+		Voters: newVoters,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("raft: proposeStableConfig: marshal: %w", err)
+	}
+
+	n.mu.Lock()
+	if n.role != RoleLeader {
+		n.mu.Unlock()
+		return 0, ErrNotLeader
+	}
+	stableIndex, _, isLeader := n.proposeEntry(LogEntry{Type: EntryTypeConfig, Data: stableData})
+	n.mu.Unlock()
+
+	if !isLeader {
+		return 0, ErrNotLeader
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, configChangeTimeout)
+	defer cancel()
+
+	if err := n.waitForCommit(waitCtx, stableIndex); err != nil {
+		return 0, fmt.Errorf("raft: proposeStableConfig: wait commit index=%d: %w", stableIndex, err)
+	}
+
+	// Step down if this leader was removed from C_new.
+	n.mu.Lock()
+	removed := !n.containsSelf(newVoters)
+	if removed {
+		slog.Info("raft: leader removed from new config (auto-resume), stepping down",
+			"id", n.id, "new_voters", newVoters)
+		n.role = RoleFollower
+		n.leaseExpiry = time.Time{}
+	}
+	n.mu.Unlock()
+
+	return stableIndex, nil
 }
 
 // Run starts the Raft state machine. Blocks until ctx is cancelled.
@@ -1064,16 +1462,22 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 
 	slog.Info("raft: starting election", "id", n.id, "term", term)
 
+	n.mu.Lock()
+	cfg := n.clusterConfig
+	n.mu.Unlock()
+
 	var peers []*RaftClient
 	if n.peers != nil {
 		peers = n.peers.All()
 	}
-	total := len(peers) + 1 // +1 for self
-	majority := total/2 + 1
 	votes := 1 // self vote
+
+	// Build a grant map for quorumFor: addr → bool.
+	grantMap := make(map[string]bool, len(peers))
 
 	type voteResult struct {
 		term    int64
+		addr    string
 		granted bool
 	}
 	resultCh := make(chan voteResult, len(peers))
@@ -1083,15 +1487,15 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 		go func() {
 			resp, err := peer.RequestVote(term, n.id, lastLogIndex, lastLogTerm)
 			if err != nil {
-				resultCh <- voteResult{}
+				resultCh <- voteResult{addr: peer.addr}
 				return
 			}
-			resultCh <- voteResult{term: resp.Term, granted: resp.VoteGranted}
+			resultCh <- voteResult{term: resp.Term, addr: peer.addr, granted: resp.VoteGranted}
 		}()
 	}
 
 	// Single-node fast path: no peers to query, self vote is already a majority.
-	if votes >= majority {
+	if n.quorumFor(cfg, func(addr string) bool { return grantMap[addr] }) {
 		n.mu.Lock()
 		if n.currentTerm == term {
 			n.role = RoleLeader
@@ -1135,8 +1539,9 @@ func (n *RaftNode) runCandidate(ctx context.Context) {
 			}
 			if res.granted {
 				votes++
+				grantMap[res.addr] = true
 			}
-			if votes >= majority {
+			if n.quorumFor(cfg, func(addr string) bool { return grantMap[addr] }) {
 				n.mu.Lock()
 				if n.currentTerm == term {
 					n.role = RoleLeader
@@ -1173,7 +1578,30 @@ func (n *RaftNode) runLeader(ctx context.Context) {
 	// Clear any lease carried over from a prior term — a newly elected leader
 	// has not yet proven its leadership via a quorum heartbeat round.
 	n.leaseExpiry = time.Time{}
+	// Phase B auto-resume (ADR-020 §Invariant 3, sub-case B):
+	// If we become leader while the cluster is in joint config (e.g. the previous
+	// leader crashed after C_old,new committed but before proposing C_new),
+	// automatically propose C_new to complete the transition.
+	var jointNewVoters []string
+	if n.clusterConfig.IsJoint() {
+		jointNewVoters = make([]string, len(n.clusterConfig.NewVoters))
+		copy(jointNewVoters, n.clusterConfig.NewVoters)
+	}
 	n.mu.Unlock()
+
+	if len(jointNewVoters) > 0 {
+		slog.Info("raft: new leader detected joint config, auto-proposing C_new",
+			"id", n.id, "new_voters", jointNewVoters)
+		go func() {
+			// Use proposeStableConfig (not ProposeConfigChange) because the cluster
+			// is already in joint phase — ProposeConfigChange would reject with
+			// ErrConfigChangeInProgress via the IsJoint guard. proposeStableConfig
+			// skips that guard and proposes C_new (Phase B) directly.
+			if _, err := n.proposeStableConfig(context.Background(), jointNewVoters); err != nil {
+				slog.Warn("raft: Phase B auto-resume failed", "err", err)
+			}
+		}()
+	}
 
 	slog.Info("raft: became leader", "id", n.id, "term", term)
 
@@ -1209,7 +1637,8 @@ func (n *RaftNode) runLeader(ctx context.Context) {
 				n.mu.Lock()
 				if n.role == RoleLeader && n.currentTerm == term {
 					lastIdx, _ := n.lastEntry()
-					n.maybeAdvanceCommitIndex(term, lastIdx, 1)
+					// Single-node: quorumFor with empty Voters always returns true for self.
+					n.maybeAdvanceCommitIndex(term, lastIdx, n.clusterConfig)
 				}
 				n.mu.Unlock()
 			}
@@ -1284,9 +1713,10 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 		for _, e := range n.log {
 			if e.Index >= ni {
 				entries = append(entries, &pb.LogEntry{
-					Index: e.Index,
-					Term:  e.Term,
-					Data:  e.Data,
+					Index:     e.Index,
+					Term:      e.Term,
+					EntryType: uint32(e.Type),
+					Data:      e.Data,
 				})
 				lastSentIdx = e.Index
 			}
@@ -1319,10 +1749,14 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 		}()
 	}
 
-	total := len(peers) + 1 // +1 for self
-	majority := total/2 + 1
-	// ackCount tracks successful heartbeat responses (self always counts as 1).
-	// Used to update the leader lease when a quorum is reached.
+	n.mu.Lock()
+	cfg := n.clusterConfig
+	n.mu.Unlock()
+
+	// ackMap tracks which peers have acknowledged this heartbeat round.
+	// Used by quorumFor for both commit advancement and lease renewal.
+	ackMap := make(map[string]bool, len(peers))
+	// ackCount is kept for lease renewal threshold check (self always counts as 1).
 	ackCount := 1
 
 	// Only collect responses from peers that got AppendEntries (sends).
@@ -1361,7 +1795,8 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 
 				// §5.4.2: advance commitIndex if a quorum has replicated an
 				// entry from the currentTerm.
-				n.maybeAdvanceCommitIndex(term, lastIdx, majority)
+				ackMap[res.addr] = true
+				n.maybeAdvanceCommitIndex(term, lastIdx, cfg)
 
 				// Lease Read: count successful ACKs (self is already 1 in ackCount).
 				// Renew lease once on first quorum crossing per heartbeat round,
@@ -1370,8 +1805,11 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 				// is computed over a reduced set — granting a lease would mean
 				// a peer whose log state is unknown has been silently included.
 				ackCount++
-				if n.leaseEnabled && snapshotPeerCount == 0 && ackCount == majority {
-					n.leaseExpiry = time.Now().Add(leaseDuration)
+				if n.leaseEnabled && snapshotPeerCount == 0 &&
+					n.quorumFor(cfg, func(addr string) bool { return ackMap[addr] }) {
+					if n.leaseExpiry.IsZero() || time.Now().Add(leaseDuration).After(n.leaseExpiry) {
+						n.leaseExpiry = time.Now().Add(leaseDuration)
+					}
 				}
 			} else {
 				// Fast Backup: jump nextIndex using conflictIndex/conflictTerm.
@@ -1412,24 +1850,22 @@ func (n *RaftNode) sendHeartbeats(ctx context.Context, peers []*RaftClient, term
 
 // maybeAdvanceCommitIndex advances commitIndex to the highest N such that:
 //   - N > commitIndex
-//   - a majority of nodes have matchIndex[peer] ≥ N
+//   - a quorum of nodes (per cfg) have matchIndex ≥ N
 //   - log[N].term == currentTerm  (§5.4.2 safety: never commit from prior terms alone)
 //
+// In joint consensus, quorumFor requires majority(C_old) AND majority(C_new).
+//
 // Must be called with mu held.
-func (n *RaftNode) maybeAdvanceCommitIndex(currentTerm, lastIdx int64, majority int) {
+func (n *RaftNode) maybeAdvanceCommitIndex(currentTerm, lastIdx int64, cfg ClusterConfig) {
 	for N := lastIdx; N > n.commitIndex; N-- {
 		e, ok := n.entryAt(N)
 		if !ok || e.Term != currentTerm {
 			continue
 		}
-		// Count replicas that have matched at least N (self always counts).
-		count := 1
-		for _, m := range n.matchIndex {
-			if m >= N {
-				count++
-			}
-		}
-		if count >= majority {
+		// Use quorumFor: self always counts; ackFn checks matchIndex per peer.
+		if n.quorumFor(cfg, func(addr string) bool {
+			return n.matchIndex[addr] >= N
+		}) {
 			n.commitIndex = N
 			slog.Info("raft: commitIndex advanced", "id", n.id, "commitIndex", N)
 			break
@@ -1450,15 +1886,19 @@ func (n *RaftNode) confirmLeadership(ctx context.Context, term int64) bool {
 		peers = n.peers.All()
 	}
 
-	total := len(peers) + 1 // +1 for self
-	majority := total/2 + 1
-
 	// Single-node fast path: self is always a quorum of one.
 	if len(peers) == 0 {
 		return true
 	}
 
-	type result struct{ ok bool }
+	n.mu.Lock()
+	cfg := n.clusterConfig
+	n.mu.Unlock()
+
+	type result struct {
+		addr string
+		ok   bool
+	}
 	ch := make(chan result, len(peers))
 
 	// Snapshot the heartbeat args while not holding mu.
@@ -1482,7 +1922,7 @@ func (n *RaftNode) confirmLeadership(ctx context.Context, term int64) bool {
 		go func() {
 			resp, err := peer.AppendEntries(args)
 			if err != nil {
-				ch <- result{ok: false}
+				ch <- result{addr: peer.addr, ok: false}
 				return
 			}
 			// Leadership confirmation requires only that the peer's term does
@@ -1490,29 +1930,29 @@ func (n *RaftNode) confirmLeadership(ctx context.Context, term int64) bool {
 			// log lags behind (prevLogIndex mismatch), but that does not
 			// invalidate our leadership — it means log repair is needed via
 			// normal replication, not that a new leader was elected.
-			ch <- result{ok: resp.Term <= term}
+			ch <- result{addr: peer.addr, ok: resp.Term <= term}
 		}()
 	}
 
 	// Self always counts.
-	successes := 1
+	ackMap := make(map[string]bool, len(peers))
 	collected := 0
 	for collected < len(peers) {
 		select {
 		case <-ctx.Done():
-			return successes >= majority
+			return n.quorumFor(cfg, func(addr string) bool { return ackMap[addr] })
 		case res := <-ch:
 			collected++
 			if res.ok {
-				successes++
+				ackMap[res.addr] = true
 			}
 			// Early exit once quorum is reached.
-			if successes >= majority {
+			if n.quorumFor(cfg, func(addr string) bool { return ackMap[addr] }) {
 				return true
 			}
 		}
 	}
-	return successes >= majority
+	return n.quorumFor(cfg, func(addr string) bool { return ackMap[addr] })
 }
 
 // ReadIndex confirms leadership and returns the commitIndex that the state

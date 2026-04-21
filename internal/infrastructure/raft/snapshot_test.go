@@ -40,6 +40,78 @@ func TestFileSnapshotStore_SaveAndLoad(t *testing.T) {
 	}
 }
 
+// TestFileSnapshotStore_ClusterConfigRoundTrip verifies that a ClusterConfig
+// embedded in SnapshotData survives a Save → Load round-trip and does not
+// appear as a regular KV entry.
+func TestFileSnapshotStore_ClusterConfigRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFileSnapshotStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileSnapshotStore: %v", err)
+	}
+
+	cfg := ClusterConfig{
+		Phase:     ConfigPhaseJoint,
+		Voters:    []string{"node-a", "node-b"},
+		NewVoters: []string{"node-c", "node-d"},
+	}
+	meta := SnapshotMeta{Index: 10, Term: 2}
+	data := SnapshotData{
+		KV:     map[string]string{"key": "val"},
+		Config: cfg,
+	}
+
+	if err := store.Save(meta, data); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	_, gotData, err := store.Load(10)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// The reserved config key must NOT be visible to the caller.
+	if _, exists := gotData.KV[snapshotConfigKey]; exists {
+		t.Error("reserved snapshotConfigKey leaked into user KV map")
+	}
+	// Regular KV entry must be intact.
+	if gotData.KV["key"] != "val" {
+		t.Errorf("KV entry lost after round-trip: %v", gotData.KV)
+	}
+	// ClusterConfig must be fully restored.
+	if gotData.Config.Phase != cfg.Phase {
+		t.Errorf("config phase: want %d got %d", cfg.Phase, gotData.Config.Phase)
+	}
+	if len(gotData.Config.Voters) != len(cfg.Voters) {
+		t.Errorf("voters count: want %d got %d", len(cfg.Voters), len(gotData.Config.Voters))
+	}
+	if len(gotData.Config.NewVoters) != len(cfg.NewVoters) {
+		t.Errorf("new_voters count: want %d got %d", len(cfg.NewVoters), len(gotData.Config.NewVoters))
+	}
+}
+
+// TestFileSnapshotStore_LegacySnapshotNilConfig verifies that a snapshot loaded
+// from a file that has no snapshotConfigKey (simulating a pre-fix binary) produces
+// a zero ClusterConfig without error.
+func TestFileSnapshotStore_LegacySnapshotNilConfig(t *testing.T) {
+	// Encode a snapshot using only the raw KV (no Config field) to simulate legacy.
+	raw, _, err := encodeSnapshot(5, 1, SnapshotData{KV: map[string]string{"a": "b"}})
+	if err != nil {
+		t.Fatalf("encodeSnapshot: %v", err)
+	}
+	_, gotData, err := decodeSnapshot(raw)
+	if err != nil {
+		t.Fatalf("decodeSnapshot: %v", err)
+	}
+	// Zero config must be returned without error.
+	if gotData.Config.Voters != nil {
+		t.Errorf("expected nil Voters for legacy snapshot, got %v", gotData.Config.Voters)
+	}
+	if gotData.Config.Phase != ConfigPhaseStable {
+		t.Errorf("expected ConfigPhaseStable for zero config, got %d", gotData.Config.Phase)
+	}
+}
+
 func TestFileSnapshotStore_LoadNotFound(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := NewFileSnapshotStore(dir)

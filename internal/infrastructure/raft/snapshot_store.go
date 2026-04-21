@@ -26,6 +26,7 @@ package raft
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"log/slog"
@@ -305,12 +306,33 @@ func unmarshalSnapshotData(raw []byte) (SnapshotMeta, SnapshotData, error) {
 
 // encodeSnapshot serialises a snapshot into the wire format and returns
 // the complete byte slice and the CRC32 of Header+Body.
+//
+// ClusterConfig is embedded as a JSON-encoded value under snapshotConfigKey so
+// that the binary format is unchanged (no version bump). The reserved key
+// begins with NUL which is not a valid user KV key, preventing collisions.
 func encodeSnapshot(index, term int64, data SnapshotData) ([]byte, uint32, error) {
-	kvCount := int64(len(data.KV))
+	// Embed ClusterConfig into the KV map under the reserved key.
+	// We marshal first so any error surfaces before we start building the buffer.
+	var configJSON []byte
+	var err error
+	configJSON, err = json.Marshal(data.Config)
+	if err != nil {
+		return nil, 0, fmt.Errorf("raft: snapshot encode: marshal cluster config: %w", err)
+	}
+
+	// Build an augmented KV that includes the config entry.
+	// Allocate a new map so we never mutate the caller's SnapshotData.
+	kvFull := make(map[string]string, len(data.KV)+1)
+	for k, v := range data.KV {
+		kvFull[k] = v
+	}
+	kvFull[snapshotConfigKey] = string(configJSON)
+
+	kvCount := int64(len(kvFull))
 
 	// Pre-calculate body size to avoid re-allocation.
 	bodySize := 0
-	for k, v := range data.KV {
+	for k, v := range kvFull {
 		bodySize += 2 + len(k) + 4 + len(v)
 	}
 
@@ -327,7 +349,7 @@ func encodeSnapshot(index, term int64, data SnapshotData) ([]byte, uint32, error
 	buf = append(buf, hdr[:]...)
 
 	// --- Body ---
-	for k, v := range data.KV {
+	for k, v := range kvFull {
 		if len(k) > 0xFFFF {
 			return nil, 0, fmt.Errorf("raft: snapshot encode: key too long (%d bytes)", len(k))
 		}
@@ -424,5 +446,18 @@ func decodeSnapshot(raw []byte) (SnapshotMeta, SnapshotData, error) {
 		kv[key] = val
 	}
 
-	return meta, SnapshotData{KV: kv}, nil
+	// Extract embedded ClusterConfig from the reserved key and strip it from
+	// the user-visible KV map so callers never observe it as a regular entry.
+	var cfg ClusterConfig
+	if configJSON, ok := kv[snapshotConfigKey]; ok {
+		if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+			// Non-fatal: old snapshots written before this change have no config key.
+			// Fall through with a zero ClusterConfig; node.go handles this gracefully.
+			slog.Warn("raft: snapshot decode: cluster config missing or malformed; using zero config",
+				"index", meta.Index, "err", err)
+		}
+		delete(kv, snapshotConfigKey)
+	}
+
+	return meta, SnapshotData{KV: kv, Config: cfg}, nil
 }

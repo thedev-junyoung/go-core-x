@@ -3,6 +3,8 @@ package raft
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -128,7 +130,10 @@ func (c *RaftClient) Close() error {
 }
 
 // PeerClients manages RaftClient instances for all peers.
+// The clients map is guarded by mu to allow EnsureConnected to add peers safely
+// after construction (ADR-020 §7: dynamic membership changes).
 type PeerClients struct {
+	mu      sync.RWMutex
 	clients map[string]*RaftClient // addr → client
 }
 
@@ -149,13 +154,36 @@ func NewPeerClients(addrs []string) (*PeerClients, error) {
 	return &PeerClients{clients: clients}, nil
 }
 
-// All returns all peer clients.
+// All returns a snapshot of all peer clients. Safe for concurrent use.
 func (p *PeerClients) All() []*RaftClient {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	result := make([]*RaftClient, 0, len(p.clients))
 	for _, c := range p.clients {
 		result = append(result, c)
 	}
 	return result
+}
+
+// EnsureConnected dials any addresses in addrs that are not yet in p.clients.
+// Idempotent: addresses already present are skipped. Safe for concurrent use.
+// Called by applyConfigEntry to connect to newly-joining peers (ADR-020 §7).
+func (p *PeerClients) EnsureConnected(addrs []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, addr := range addrs {
+		if _, ok := p.clients[addr]; ok {
+			continue // already connected
+		}
+		c, err := NewRaftClient(addr)
+		if err != nil {
+			slog.Warn("raft: EnsureConnected: failed to dial new peer",
+				"addr", addr, "err", err)
+			continue
+		}
+		p.clients[addr] = c
+		slog.Info("raft: EnsureConnected: dialed new peer", "addr", addr)
+	}
 }
 
 // InstallSnapshot sends a snapshot to the named peer (keyed by addr).
@@ -168,7 +196,9 @@ func (p *PeerClients) InstallSnapshot(
 	meta SnapshotMeta,
 	data SnapshotData,
 ) error {
+	p.mu.RLock()
 	c, ok := p.clients[peerID]
+	p.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("raft: install snapshot: unknown peer %q", peerID)
 	}
@@ -178,6 +208,8 @@ func (p *PeerClients) InstallSnapshot(
 
 // Close closes all peer connections.
 func (p *PeerClients) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, c := range p.clients {
 		c.Close()
 	}
