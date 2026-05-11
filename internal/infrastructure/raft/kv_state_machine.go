@@ -9,10 +9,15 @@ import (
 )
 
 // RaftKVCommand is the payload stored in LogEntry.Data for Raft KV operations.
+//
+// ExpectedVersion == 0 means unconditional write (backward-compatible with
+// existing "set" / "del" ops). ExpectedVersion > 0 with op == "cas" means
+// write only if latest[key] == ExpectedVersion; conflict otherwise (ADR-022).
 type RaftKVCommand struct {
-	Op    string `json:"op"`    // "set" | "del"
-	Key   string `json:"key"`
-	Value string `json:"value"` // empty for "del"
+	Op              string `json:"op"`                         // "set" | "del" | "cas"
+	Key             string `json:"key"`
+	Value           string `json:"value"`                      // empty for "del"
+	ExpectedVersion uint64 `json:"expected_version,omitempty"` // 0 = unconditional write
 }
 
 // KVDurableStore is the persistence interface required by KVStateMachine.
