@@ -1,6 +1,18 @@
 # Core-X v2 — Correctness Over Consensus
 
-> v1이 Raft를 **구현**한 시간이었다면, v2는 Raft를 **올바르게 사용**하는 시간입니다.
+> v1이 Raft를 **구현**한 시간이었다면, v2는 Raft를 **올바르게 사용**하는 시간이다.
+
+**Status: Complete** (Phase 10–12, ADR-019–021)
+
+---
+
+## v2 완료 요약
+
+| Phase | 주제 | ADR | PR | 상태 |
+|---|---|---|---|---|
+| 10 | Linearizable Read (ReadIndex + Lease Read) | ADR-019 | #73 | ✅ |
+| 11 | Joint Consensus (동적 멤버십 변경) | ADR-020 | #75 | ✅ |
+| 12 | Storage Unification (단일 Raft-backed KV) | ADR-021 | #76 | ✅ |
 
 ---
 
@@ -24,29 +36,6 @@ Raft가 guarantee하는 것은 "committed된 쓰기는 유실되지 않는다"�
 
 ---
 
-## 왜 이게 실무에서 중요한가
-
-**재고 시스템**: 마지막 재고 1개 차감 → 즉시 재고 조회 → stale read로 1개 있음 → 이중 판매
-
-**결제 시스템**: 결제 완료 → 잔액 조회 → 이전 잔액 반환 → 사용자 혼란
-
-**권한 시스템**: 관리자가 권한 박탈 → 박탈된 사용자가 여전히 API 접근
-
-이 모든 문제는 **master-slave (leader-follower) 구조에서 읽기 경로를 올바르게 설계하지 않으면 발생**한다.
-MySQL replication lag, Redis Sentinel failover, etcd의 기본 read — 동일한 문제 클래스다.
-
----
-
-## v2 목표
-
-| # | 주제 | 핵심 문제 | DDIA |
-|---|------|----------|------|
-| 1 | **Linearizable Read** | GET이 stale read를 반환할 수 있음 | Ch.9 Linearizability |
-| 2 | **Joint Consensus** | 클러스터 멤버십 변경 중 safety 보장 | Ch.9 §6 |
-| 3 | **Storage Unification** | 두 개의 write path → 하나의 Raft-backed storage | Ch.3 + Ch.9 |
-
----
-
 ## Phase 10: Linearizable Read (ADR-019)
 
 ### 문제
@@ -65,7 +54,7 @@ MySQL replication lag, Redis Sentinel failover, etcd의 기본 read — 동일�
 ### 해결: ReadIndex Protocol
 
 ```
-GET /raft/kv/{key} (ReadIndex):
+GET /kv/{key} (ReadIndex):
   1. leader가 현재 commitIndex를 기록 (readIndex)
   2. quorum에 heartbeat 전송 → "내가 아직 leader가 맞나?" 확인
   3. quorum 응답 수신 → leader 지위 확인됨
@@ -86,16 +75,14 @@ Lease Read:
 
 이유: election timeout 내에 다른 leader가 선출될 수 없음
 결과: 읽기 latency ~50μs (20x 개선)
-
-단, monotonic clock이 필요 (system clock skew 주의)
 ```
 
-### 구현 범위
+### 구현된 것
 
 - `RaftNode.ReadIndex(ctx) (uint64, error)` — quorum heartbeat + commitIndex 반환
-- `GET /raft/kv/{key}` 핸들러 수정 — ReadIndex 호출 후 WaitForIndex 대기
-- Lease Read 옵션 (`CORE_X_RAFT_LEASE_READ=true`)
-- 통합 테스트: 파티션 시나리오에서 stale read 발생 → ReadIndex 적용 후 linearizable 확인
+- `RaftNode.ReadIndexLease(ctx)` — clock-based lease, quorum 생략
+- `UnifiedKVHandler` — ReadIndex → WaitForIndex → sm.Get 전체 파이프라인
+- 독립 context budget: ReadIndex 2s + WaitForIndex 2s (합산 아님)
 
 ---
 
@@ -130,65 +117,76 @@ Lease Read:
     - 전환 완료
 ```
 
-### 구현 범위
+### 구현된 것
 
-- `ClusterConfig` — old/new 멤버십 표현
-- `AppendEntries`에 config change log entry 타입 추가
-- `quorumSize()` — joint consensus 중 양쪽 quorum 계산
+- `ClusterConfig` — `Voters []string`, `OldVoters []string` (joint 상태 표현)
+- `ClusterConfig.IsJoint() bool`, `ClusterConfig.AllPeers() []string`
+- `quorumSize()` — joint consensus 중 양쪽 quorum 독립 계산
 - `POST /raft/config` — 노드 추가/제거 API
-- 통합 테스트: 3→5 확장, 5→3 축소, 전환 중 leader election
+- `ClusterConfig.IsZero()` — snapshot 복구 시 빈 config 안전 처리
+- `EnsureConnected` on snapshot restore — 복구 후 peer 연결 재수립
 
 ---
 
 ## Phase 12: Storage Unification (ADR-021)
 
-### 현재 구조 (ADR-018에서 의도적으로 분리)
+### 기존 구조 (v1, ADR-018에서 의도적으로 분리)
 
 ```
-POST /ingest → Consistent Hashing → Bitcask KV (WAL-backed)
-POST /raft/kv → Raft consensus → KVStateMachine (in-memory + snapshot)
+POST /ingest → Consistent Hashing → ring.Lookup → Bitcask KV (WAL)
+GET  /kv/{key} → KVStateMachine (in-memory, Raft-backed)
 ```
 
-v1에서 이 분리는 **의도적**이었다: 각 path가 다른 DDIA 챕터를 학습하기 위해.
+같은 시스템인데 쓰기와 읽기가 **다른 스토리지**를 바라봤다.
+이 분리는 v1에서 학습 목적으로 의도적이었다.
 
 ### v2에서의 통합
 
 ```
-Consistent Hashing → Raft leader로 라우팅 (routing layer로 격상)
-모든 쓰기 → Raft consensus → WAL-backed KVStateMachine
+POST /ingest → RaftNode.Propose → KVStateMachine.Apply → 204
+GET  /kv/{key} → ReadIndex → WaitForIndex → KVStateMachine.Get → 200
+
+ring은 "어느 노드가 담당하나" (파티셔닝 레이어)
+Raft는 "그 파티션이 어떻게 합의하나" (복제 레이어)
 ```
 
-```
-POST /ingest → ring.Lookup(key) → 담당 Raft group leader → Propose → Apply
-GET /kv/{key} → ring.Lookup(key) → 담당 Raft group leader → ReadIndex → Apply
-```
+### 구현된 것
 
-### 의미
-
-Consistent Hashing이 "어떤 노드가 담당하나" (파티셔닝)를 결정하고,
-Raft가 "그 파티션 내에서 어떻게 합의하나" (복제)를 담당한다.
-
-이것이 **실제 분산 데이터베이스 (TiKV, CockroachDB)의 구조**다.
+- `RaftGroupRegistry` — PartitionID → *RaftNode thread-safe 매핑
+- `NewHTTPHandler` 단일 생성자 — legacy 생성자 3개 제거
+- `serveUnifiedIngest` — not-leader 시 307 redirect (addrMap 기반)
+- `CORE_X_STORAGE_UNIFIED` feature flag 완전 제거
+- 독립 context budget: Propose timeout 5s (ReadIndex/WaitForIndex와 별도)
+- chaos audit 반영: write path redirect 대칭성, ctx 분리, duplicate Register 경고
 
 ---
 
 ## v1 → v2 학습 맵
 
-| 단계 | 주제 | DDIA |
-|------|------|------|
-| v1 Phase 1–3 | WAL, Bitcask, Consistent Hashing | Ch.3, Ch.6 |
-| v1 Phase 5–9 | Raft 구현 (election, replication, snapshot) | Ch.7, Ch.9 |
-| **v2 Phase 10** | **Linearizable Read (ReadIndex, Lease Read)** | **Ch.9** |
-| **v2 Phase 11** | **Joint Consensus (dynamic membership)** | **Ch.9** |
-| **v2 Phase 12** | **Storage Unification (Raft-backed Bitcask)** | **Ch.3 + Ch.9** |
+| 단계 | Phase | 주제 | DDIA |
+|------|-------|------|------|
+| v1 | 1–2 | WAL, Bitcask KV, zero-allocation write path | Ch.3 |
+| v1 | 3 | Consistent Hashing, gRPC forwarding | Ch.6 |
+| v1 | 4 | Read path, observability | Ch.3 |
+| v1 | 5a–5d | Raft leader election, log replication, write path | Ch.7, Ch.9 |
+| v1 | 6 | Raft KV state machine + HTTP 연동 | Ch.9 |
+| v1 | 7 | Multi-node 통합 테스트, leader redirect | Ch.9 |
+| v1 | 8 | WAL + Bitcask storage integration (durability) | Ch.3, Ch.9 |
+| v1 | 9 | Raft snapshot (log compaction) | Ch.9 |
+| **v2** | **10** | **Linearizable Read (ReadIndex, Lease Read)** | **Ch.9** |
+| **v2** | **11** | **Joint Consensus (동적 멤버십)** | **Ch.9** |
+| **v2** | **12** | **Storage Unification** | **Ch.3 + Ch.9** |
 
 ---
 
-## 시작점
+## 시스템이 보장하는 것 (v2 기준)
 
-**Phase 10 (Linearizable Read)** 가 v2의 첫 번째 목표다.
-
-v1의 모든 읽기 경로가 correctness gap을 가지고 있고,
-이것이 가장 빠르게 구현 가능하며 가장 즉각적인 correctness 개선을 제공한다.
-
-ADR-019 작성 → 구현 → E2E 파티션 테스트 순서로 진행.
+| 보장 | 메커니즘 |
+|---|---|
+| Write durability | Raft log → WAL-backed apply |
+| Write linearizability | Propose → committed → WaitForIndex → 204 |
+| Read linearizability | ReadIndex quorum confirm → WaitForIndex → sm.Get |
+| Split-brain prevention | Joint consensus C_old,new → C_new |
+| Membership safety | 두 단계 전환 — 단일 quorum 항상 유지 |
+| Leader redirect | 307 (addrMap 있을 때) / 503 (없을 때) |
+| Snapshot safety | IsZero() guard + EnsureConnected on restore |
