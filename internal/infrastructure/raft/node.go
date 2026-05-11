@@ -791,13 +791,20 @@ func (n *RaftNode) HandleInstallSnapshot(args InstallSnapshotArgs) InstallSnapsh
 	}
 	// INV-CC3: restore clusterConfig from snapshot so a follower that becomes
 	// leader after InstallSnapshot uses the correct quorum — not the stale
-	// pre-snapshot config.  Mirror the same nil-guard used in recoverFromSnapshot.
-	if data.Config.Voters != nil {
+	// pre-snapshot config.  IsZero guards against pre-ADR-021 snapshots that
+	// carry no config, preventing us from overwriting a valid live config with
+	// the zero value.
+	if !data.Config.IsZero() {
 		n.clusterConfig = data.Config
 		slog.Info("raft: install snapshot: clusterConfig restored",
 			"index", args.LastIncludedIndex,
 			"voters", data.Config.Voters,
 			"phase", data.Config.Phase)
+		// Ensure connections to all peers in the restored config.
+		// EnsureConnected uses p.mu (not n.mu) — safe to call while holding n.mu.
+		if n.peers != nil {
+			n.peers.EnsureConnected(data.Config.AllPeers())
+		}
 	}
 	n.mu.Unlock()
 
@@ -947,13 +954,21 @@ func (n *RaftNode) recoverFromSnapshot() int64 {
 	// Restore ClusterConfig from the snapshot so that post-restart quorum
 	// decisions use the correct membership (ADR-020 §Safety: snapshot must
 	// carry config state to survive WAL compaction of config entries).
-	// data.Config is zero if the snapshot was written by a pre-fix binary;
+	// IsZero guards against pre-ADR-021 snapshots that carry no config;
 	// in that case we leave clusterConfig as-is (initialised from WAL replay).
-	if data.Config.Voters != nil {
+	if !data.Config.IsZero() {
 		n.clusterConfig = data.Config
 		slog.Info("raft: cluster config restored from snapshot",
 			"index", latestMeta.Index, "voters", data.Config.Voters,
 			"phase", data.Config.Phase)
+		// Ensure connections to all peers in the restored config.
+		// EnsureConnected is a no-op for already-connected peers; it only
+		// dials addresses that are not yet in PeerClients.clients. This is
+		// necessary when WAL config entries were compacted and the only record
+		// of membership is in the snapshot.
+		if n.peers != nil {
+			n.peers.EnsureConnected(data.Config.AllPeers())
+		}
 	}
 
 	// Filter n.log: discard entries already covered by the snapshot.

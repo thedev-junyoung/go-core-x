@@ -43,6 +43,14 @@ func (c ClusterConfig) IsJoint() bool {
 	return c.Phase == ConfigPhaseJoint
 }
 
+// IsZero reports whether the ClusterConfig is the zero value — i.e. no voters
+// have been set. Used as a backward-compatibility guard when reading ClusterConfig
+// from a snapshot: a snapshot written by a pre-ADR-021 binary will have an empty
+// Config field, and we must not overwrite the live clusterConfig with it.
+func (c ClusterConfig) IsZero() bool {
+	return len(c.Voters) == 0
+}
+
 // OldQuorumSize returns the majority threshold for C_old (self included).
 // The +1 accounts for the self node which is not in Voters.
 func (c ClusterConfig) OldQuorumSize() int {
