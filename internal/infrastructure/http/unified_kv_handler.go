@@ -27,10 +27,14 @@ import (
 	infraraft "github.com/junyoung/core-x/internal/infrastructure/raft"
 )
 
-// unifiedReadTimeout caps ReadIndex + WaitForIndex combined. The outer
-// ServeHTTP context inherits the server's WriteTimeout (10 s), so this is an
-// additional inner bound to avoid goroutine leaks when quorum is lost.
-const unifiedReadTimeout = 3 * time.Second
+// unifiedReadIndexTimeout caps the ReadIndex RPC (leadership confirmation + quorum round-trip).
+// unifiedWaitForIndexTimeout caps WaitForIndex (state machine apply lag).
+// Each phase gets its own independent budget so a slow ReadIndex does not
+// silently starve WaitForIndex, causing spurious 504s.
+const (
+	unifiedReadIndexTimeout    = 2 * time.Second
+	unifiedWaitForIndexTimeout = 2 * time.Second
+)
 
 // UnifiedKVHandler handles GET /kv/{key} via Raft ReadIndex.
 //
@@ -133,10 +137,12 @@ func (h *UnifiedKVHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), unifiedReadTimeout)
-	defer cancel()
+	// Phase 1: confirm leadership and obtain a safe read index.
+	// Uses its own deadline so it does not consume time from the WaitForIndex budget.
+	readCtx, readCancel := context.WithTimeout(r.Context(), unifiedReadIndexTimeout)
+	defer readCancel()
 
-	readIndex, err := node.ReadIndex(ctx)
+	readIndex, err := node.ReadIndex(readCtx)
 	if err != nil {
 		if errors.Is(err, infraraft.ErrNotLeader) {
 			if leaderID := node.LeaderID(); leaderID != "" {
@@ -153,7 +159,13 @@ func (h *UnifiedKVHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.sm.WaitForIndex(ctx, int64(readIndex)); err != nil {
+	// Phase 2: wait for the state machine to apply up to readIndex.
+	// Independent deadline ensures apply-lag under load does not inherit a
+	// depleted context from Phase 1.
+	waitCtx, waitCancel := context.WithTimeout(r.Context(), unifiedWaitForIndexTimeout)
+	defer waitCancel()
+
+	if err := h.sm.WaitForIndex(waitCtx, int64(readIndex)); err != nil {
 		http.Error(w, "timed out waiting for state machine", http.StatusGatewayTimeout)
 		return
 	}

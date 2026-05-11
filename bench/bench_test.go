@@ -123,7 +123,7 @@ func BenchmarkCoreXIngest(b *testing.B) {
 	registry, sm, stop := newBenchRaftInfra(b)
 	defer stop()
 
-	handler := infrahttp.NewHTTPHandler(nil, "bench", nil, 0, registry, sm)
+	handler := infrahttp.NewHTTPHandler(nil, "bench", nil, 0, registry, sm, nil)
 
 	b.ReportAllocs()
 	b.ResetTimer()

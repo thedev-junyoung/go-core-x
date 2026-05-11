@@ -1,6 +1,9 @@
 package raft
 
-import "sync"
+import (
+	"log/slog"
+	"sync"
+)
 
 // PartitionID uniquely identifies a Raft partition (shard) within the cluster.
 // It is a string to support both numeric ("0", "1") and named ("shard-us-east") identifiers.
@@ -40,7 +43,11 @@ func (r *RaftGroupRegistry) Register(id PartitionID, node *RaftNode) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.nodes[id]; exists {
-		return // INV-RGR1: immutable entries
+		// INV-RGR1: immutable entries — duplicate is silently ignored,
+		// but we warn so operators can detect misconfiguration at startup.
+		slog.Warn("raft: RaftGroupRegistry.Register: duplicate partition ID ignored",
+			"partition", id)
+		return
 	}
 	r.nodes[id] = node
 }

@@ -59,12 +59,17 @@ type HTTPHandler struct {
 	// Unified write path fields. Always non-nil (enforced by NewHTTPHandler).
 	registry *infraraft.RaftGroupRegistry
 	kvSM     *infraraft.KVStateMachine
+
+	// addrMap maps nodeID → HTTP base URL for leader redirect on write path.
+	// nil disables redirect (falls back to 503).
+	addrMap map[string]string
 }
 
 // NewHTTPHandler 는 unified write path 핸들러를 생성한다 (Phase 12b 단일 생성자).
 //
 // registry와 kvSM은 nil이어서는 안 된다. nil이면 panic한다.
 // ring이 nil이면 단일 노드 모드로 동작한다 (gRPC forwarding 없음).
+// addrMap이 nil이면 not-leader 시 307 redirect 대신 503을 반환한다.
 func NewHTTPHandler(
 	ring *cluster.Ring,
 	selfID string,
@@ -72,6 +77,7 @@ func NewHTTPHandler(
 	forwardTimeout time.Duration,
 	registry *infraraft.RaftGroupRegistry,
 	kvSM *infraraft.KVStateMachine,
+	addrMap map[string]string,
 ) *HTTPHandler {
 	if registry == nil {
 		panic("http: NewHTTPHandler requires non-nil registry")
@@ -89,23 +95,8 @@ func NewHTTPHandler(
 		forwardTimeout: forwardTimeout,
 		registry:       registry,
 		kvSM:           kvSM,
+		addrMap:        addrMap,
 	}
-}
-
-// NewUnifiedHTTPHandler is an alias for NewHTTPHandler retained for test
-// compatibility. Callers should migrate to NewHTTPHandler.
-//
-// Deprecated: use NewHTTPHandler directly.
-func NewUnifiedHTTPHandler(
-	_ interface{}, // svc — no longer used; accepted for call-site compatibility
-	ring *cluster.Ring,
-	selfID string,
-	forwarder *infragrpc.Forwarder,
-	forwardTimeout time.Duration,
-	registry *infraraft.RaftGroupRegistry,
-	kvSM *infraraft.KVStateMachine,
-) *HTTPHandler {
-	return NewHTTPHandler(ring, selfID, forwarder, forwardTimeout, registry, kvSM)
 }
 
 // ServeHTTP 는 POST /ingest를 처리한다.
@@ -201,6 +192,15 @@ func (h *HTTPHandler) serveUnifiedIngest(w http.ResponseWriter, r *http.Request,
 	index, _, isLeader := node.Propose(data)
 	if !isLeader {
 		slog.Warn("unified ingest: not the Raft leader", "partition", partitionID)
+		// Mirror the read path: redirect to the known leader when addrMap is set.
+		if h.addrMap != nil {
+			if leaderID := node.LeaderID(); leaderID != "" {
+				if baseURL, ok := h.addrMap[leaderID]; ok {
+					http.Redirect(w, r, baseURL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+					return
+				}
+			}
+		}
 		http.Error(w, "not the Raft leader — retry on the leader node", http.StatusServiceUnavailable)
 		return
 	}

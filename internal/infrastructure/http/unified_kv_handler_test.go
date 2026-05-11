@@ -146,7 +146,7 @@ func TestUnifiedKVHandler_EndToEnd(t *testing.T) {
 }
 
 // TestUnifiedHTTPHandler_UnifiedIngest_NotLeader checks that serveUnifiedIngest
-// returns 503 when the Raft node is not the leader.
+// returns 503 when the Raft node is not the leader and addrMap is nil.
 func TestUnifiedHTTPHandler_UnifiedIngest_NotLeader(t *testing.T) {
 	// A node that has never run will not be leader.
 	node := infraraft.NewRaftNode("n1", nil, nil, nil)
@@ -154,14 +154,60 @@ func TestUnifiedHTTPHandler_UnifiedIngest_NotLeader(t *testing.T) {
 	registry := infraraft.NewRaftGroupRegistry()
 	registry.Register(infraraft.PartitionID("n1"), node)
 
-	h := infrahttp.NewUnifiedHTTPHandler(
-		nil, // svc — unused when ring is nil (no forwarding) and unified path is taken
-		nil, // ring
-		"n1",
-		nil, // forwarder
-		0,
-		registry, sm,
-	)
+	h := infrahttp.NewHTTPHandler(nil, "n1", nil, 0, registry, sm, nil)
+
+	body := testMarshal(t, map[string]string{"source": "src1", "payload": "data"})
+	req := httptest.NewRequest(http.MethodPost, "/ingest", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServeUnifiedIngest_NotLeader_Redirects307 checks that serveUnifiedIngest
+// returns 307 redirect when addrMap contains the current leader's HTTP base URL.
+func TestServeUnifiedIngest_NotLeader_Redirects307(t *testing.T) {
+	// n1 is a follower (never runs); n2 is injected as leader via ForceLeaderID.
+	node := infraraft.NewRaftNode("n1", nil, nil, nil)
+	node.ForceLeaderID("n2")
+
+	sm := infraraft.NewKVStateMachine(nil)
+	registry := infraraft.NewRaftGroupRegistry()
+	registry.Register(infraraft.PartitionID("n1"), node)
+
+	addrMap := map[string]string{
+		"n2": "http://node2:8080",
+	}
+	h := infrahttp.NewHTTPHandler(nil, "n1", nil, 0, registry, sm, addrMap)
+
+	body := testMarshal(t, map[string]string{"source": "src1", "payload": "data"})
+	req := httptest.NewRequest(http.MethodPost, "/ingest", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307, got %d: %s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "http://node2:8080/ingest" {
+		t.Fatalf("unexpected redirect Location: %q", loc)
+	}
+}
+
+// TestServeUnifiedIngest_NotLeader_503NoHint checks that serveUnifiedIngest
+// falls back to 503 when addrMap is nil (no leader hint available).
+func TestServeUnifiedIngest_NotLeader_503NoHint(t *testing.T) {
+	node := infraraft.NewRaftNode("n1", nil, nil, nil)
+	// leaderID unknown — ForceLeaderID not called, so LeaderID() returns "".
+	sm := infraraft.NewKVStateMachine(nil)
+	registry := infraraft.NewRaftGroupRegistry()
+	registry.Register(infraraft.PartitionID("n1"), node)
+
+	h := infrahttp.NewHTTPHandler(nil, "n1", nil, 0, registry, sm, nil)
 
 	body := testMarshal(t, map[string]string{"source": "src1", "payload": "data"})
 	req := httptest.NewRequest(http.MethodPost, "/ingest", body)
@@ -180,14 +226,7 @@ func TestUnifiedHTTPHandler_UnifiedIngest_EndToEnd(t *testing.T) {
 	_, sm, registry, cancel := startLeaderSM(t)
 	defer cancel()
 
-	h := infrahttp.NewUnifiedHTTPHandler(
-		nil, // svc — ring is nil, so we go directly to serveUnifiedIngest
-		nil, // ring
-		"n1",
-		nil, // forwarder
-		0,
-		registry, sm,
-	)
+	h := infrahttp.NewHTTPHandler(nil, "n1", nil, 0, registry, sm, nil)
 
 	body := testMarshal(t, map[string]string{"source": "device-42", "payload": "hello"})
 	req := httptest.NewRequest(http.MethodPost, "/ingest", body)

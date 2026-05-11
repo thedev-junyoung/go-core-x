@@ -562,6 +562,7 @@ func main() {
 	ingestHandler := infrahttp.NewHTTPHandler(
 		ring, nodeID, forwarder, forwardTimeout,
 		raftRegistry, raftKVSM,
+		raftAddrMap,
 	)
 	slog.Info("ingest: unified write path active (Phase 12b)")
 
