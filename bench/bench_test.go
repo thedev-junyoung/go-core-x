@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/junyoung/core-x/internal/domain"
 	"github.com/junyoung/core-x/internal/infrastructure/executor"
 	infrahttp "github.com/junyoung/core-x/internal/infrastructure/http"
+	infraraft "github.com/junyoung/core-x/internal/infrastructure/raft"
 	"github.com/junyoung/core-x/internal/infrastructure/pool"
 )
 
@@ -77,14 +79,51 @@ func newBenchInfra() (*appingestion.IngestionService, func()) {
 
 const benchBody = `{"source":"bench","payload":"hello-world"}`
 
-// BenchmarkCoreXIngest는 stdlib net/http 핸들러의 메모리 할당을 측정한다.
+// newBenchRaftInfra는 벤치마크용 단일 노드 Raft leader + KVStateMachine을 반환한다.
 //
-// 기대값: ~1 alloc/op (json.NewDecoder 내부 버퍼), ~512 B/op
-func BenchmarkCoreXIngest(b *testing.B) {
-	svc, cleanup := newBenchInfra()
-	defer cleanup()
+// Phase 12b: HTTPHandler는 Raft를 통한 쓰기만 지원하므로 벤치마크도 Raft를 사용한다.
+// 단일 노드 클러스터라 Propose가 즉시 커밋된다 — 네트워크 RTT 없이 순수 핸들러 오버헤드를 측정한다.
+func newBenchRaftInfra(b *testing.B) (*infraraft.RaftGroupRegistry, *infraraft.KVStateMachine, context.CancelFunc) {
+	b.Helper()
+	node := infraraft.NewRaftNode("bench", nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	go node.Run(ctx)
 
-	handler := infrahttp.NewHTTPHandler(svc)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if node.Role() == infraraft.RoleLeader {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if node.Role() != infraraft.RoleLeader {
+		cancel()
+		b.Fatal("bench raft node did not become leader in time")
+	}
+
+	sm := infraraft.NewKVStateMachine(nil)
+	smCtx, smCancel := context.WithCancel(context.Background())
+	go sm.Run(smCtx, node.ApplyCh())
+
+	registry := infraraft.NewRaftGroupRegistry()
+	registry.Register(infraraft.PartitionID("bench"), node)
+
+	stop := func() {
+		cancel()
+		smCancel()
+	}
+	return registry, sm, stop
+}
+
+// BenchmarkCoreXIngest는 unified write path (Raft Propose → WaitForIndex)를 포함한
+// stdlib net/http 핸들러의 처리량과 메모리 할당을 측정한다.
+//
+// Phase 12b 기준치: 단일 노드 Raft(로컬 커밋)이므로 네트워크 비용 없음.
+func BenchmarkCoreXIngest(b *testing.B) {
+	registry, sm, stop := newBenchRaftInfra(b)
+	defer stop()
+
+	handler := infrahttp.NewHTTPHandler(nil, "bench", nil, 0, registry, sm)
 
 	b.ReportAllocs()
 	b.ResetTimer()

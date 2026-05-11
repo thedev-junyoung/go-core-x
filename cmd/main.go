@@ -77,6 +77,8 @@ func main() {
 	snapshotDir := envOr("CORE_X_SNAPSHOT_DIR", "./data/snapshots")
 	snapshotThreshold := int64(envInt("CORE_X_SNAPSHOT_THRESHOLD", 10_000))
 	vnodeCount := envInt("CORE_X_VNODE_COUNT", 150)
+	// Phase 12b (ADR-021 Step 4): CORE_X_STORAGE_UNIFIED flag removed.
+	// The unified Raft write path is now the only supported path.
 	forwardTimeoutStr := envOr("CORE_X_FORWARD_TIMEOUT", "3s")
 	forwardTimeout, err := time.ParseDuration(forwardTimeoutStr)
 	if err != nil {
@@ -353,8 +355,9 @@ func main() {
 	// Raft is only activated in cluster mode (nodeID + grpcAddr + grpcSrv configured).
 	// Standalone mode skips Raft entirely.
 	var (
-		raftNode *infraraft.RaftNode
-		raftKVSM *infraraft.KVStateMachine
+		raftNode     *infraraft.RaftNode
+		raftKVSM     *infraraft.KVStateMachine
+		raftRegistry = infraraft.NewRaftGroupRegistry()
 	)
 
 	if nodeID != "" && grpcAddr != "" && grpcSrv != nil {
@@ -399,6 +402,7 @@ func main() {
 		defer raftLogStore.Close()
 
 		raftNode = infraraft.NewRaftNode(nodeID, peerClients, metaStore, raftLogStore)
+		raftRegistry.Register(infraraft.PartitionID(nodeID), raftNode)
 		raftServer := infraraft.NewRaftServer(raftNode)
 		grpcSrv.RegisterRaftService(raftServer)
 
@@ -541,32 +545,49 @@ func main() {
 	// 순수 stdlib ServeMux. 미들웨어 프레임워크 없음.
 	// 크로스커팅 관심사(인증, 추적)는 필요 시 http.Handler 래퍼로 구현된다 —
 	// 프레임워크 의존성을 추가하지 않는다.
-	var ingestHandler *infrahttp.HTTPHandler
-	if ring != nil {
-		ingestHandler = infrahttp.NewClusterHTTPHandler(svc, ring, nodeID, forwarder, forwardTimeout)
-	} else {
-		ingestHandler = infrahttp.NewHTTPHandler(svc)
+	//
+	// Phase 12b (ADR-021): unified write path is the only supported path.
+	// raftRegistry and raftKVSM must be non-nil; they are only non-nil when
+	// raftNode was successfully initialised in cluster mode.
+	// Standalone mode (no nodeID/grpcAddr) cannot use the unified path and
+	// will exit here with a clear error.
+	if raftNode == nil || raftKVSM == nil {
+		slog.Error("FATAL: unified write path requires Raft to be active. " +
+			"Set CORE_X_NODE_ID and CORE_X_GRPC_ADDR to enable cluster mode.")
+		os.Exit(1)
 	}
 
-	kvHandler := infrahttp.NewKVHandler(kvStore, ring, nodeID, forwarder)
+	raftAddrMap := parseRaftHTTPNodes(raftHTTPNodes)
+
+	ingestHandler := infrahttp.NewHTTPHandler(
+		ring, nodeID, forwarder, forwardTimeout,
+		raftRegistry, raftKVSM,
+	)
+	slog.Info("ingest: unified write path active (Phase 12b)")
+
+	// GET /kv/{key}: Raft ReadIndex → linearizable read.
+	kvReadHandler := infrahttp.NewUnifiedKVHandler(
+		raftRegistry, raftKVSM,
+		nodeID, ring, forwarder, forwardTimeout,
+		raftAddrMap,
+	)
+	slog.Info("kv read: unified path active (Phase 12b)")
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /ingest", ingestHandler)
-	mux.Handle("GET /kv/{key}", kvHandler)
+	mux.Handle("GET /kv/{key}", kvReadHandler)
 	mux.HandleFunc("GET /stats", infrahttp.StatsHandler(workerPool, replLag))
 	mux.Handle("GET /metrics", inframetrics.NewHTTPHandler(promReg))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Phase 6/7: Raft KV endpoints — only registered when Raft is active.
+	// Phase 6/7: Raft KV endpoints (always registered — Phase 12b guarantees
+	// raftNode and raftKVSM are non-nil by this point).
 	// Phase 11 (ADR-020): POST /raft/config for dynamic membership changes.
-	if raftNode != nil && raftKVSM != nil {
-		raftAddrMap := parseRaftHTTPNodes(raftHTTPNodes)
-		mux.Handle("POST /raft/kv", infrahttp.NewProposeHandler(raftNode, raftKVSM, raftAddrMap))
-		mux.Handle("GET /raft/kv/{key}", infrahttp.NewRaftKVGetHandler(raftNode, raftKVSM, raftAddrMap))
-		mux.Handle("POST /raft/config", infrahttp.NewConfigHandler(raftNode, raftAddrMap))
-	}
+	mux.Handle("POST /raft/kv", infrahttp.NewProposeHandler(raftNode, raftKVSM, raftAddrMap))
+	mux.Handle("GET /raft/kv/{key}", infrahttp.NewRaftKVGetHandler(raftNode, raftKVSM, raftAddrMap))
+	mux.Handle("POST /raft/config", infrahttp.NewConfigHandler(raftNode, raftAddrMap))
 
 	// --- HTTP 서버 (HTTP Server) ---------------------------------------------
 	// 명시적 타임아웃은 선택 사항이 아니다.
