@@ -357,6 +357,8 @@ func main() {
 	var (
 		raftNode     *infraraft.RaftNode
 		raftKVSM     *infraraft.KVStateMachine
+		raftMVCCSM   *infraraft.MVCCStateMachine // Phase 13 MVCC state machine (ADR-022)
+		raftChangeLog *infraraft.ChangeLog        // Phase 14 CDC event bus (ADR-023)
 		raftRegistry = infraraft.NewRaftGroupRegistry()
 	)
 
@@ -442,6 +444,15 @@ func main() {
 
 		raftKVSM = infraraft.NewKVStateMachine(raftKVStore)
 
+		// Phase 13 (ADR-022): MVCC state machine — in-memory, no durable backend.
+		// retention=10: keep last 10 versions per key (tunable via env if needed).
+		raftMVCCSM = infraraft.NewMVCCStateMachine(nil, 10)
+
+		// Phase 14 (ADR-023): CDC ChangeLog — created only in cluster mode.
+		// historyLimit=1000 (DefaultHistoryLimit); metrics registered on promReg.
+		raftChangeLog = infraraft.NewChangeLog(infraraft.DefaultHistoryLimit, promReg)
+		raftMVCCSM.SetChangeLog(raftChangeLog)
+
 		// Phase 9a: KV state machine 및 snapshot store 배선.
 		raftNode.SetStateMachine(raftKVSM)
 
@@ -512,7 +523,24 @@ func main() {
 			"raft_last_applied", raftLastApplied,
 		)
 
-		go raftKVSM.Run(raftCtx, raftNode.ApplyCh())
+		// Fan-out applyCh to both KVStateMachine and MVCCStateMachine.
+		// RaftNode.ApplyCh() returns a single channel; multiple consumers would
+		// race. We multiplex here so each state machine sees every committed entry.
+		kvApplyCh := make(chan infraraft.LogEntry, 256)
+		mvccApplyCh := make(chan infraraft.LogEntry, 256)
+		go func() {
+			defer close(kvApplyCh)
+			defer close(mvccApplyCh)
+			for entry := range raftNode.ApplyCh() {
+				kvApplyCh <- entry
+				mvccApplyCh <- entry
+			}
+		}()
+
+		go raftKVSM.Run(raftCtx, kvApplyCh)
+
+		// Phase 13/14: MVCC state machine + CDC (ADR-022, ADR-023).
+		go raftMVCCSM.Run(raftCtx, mvccApplyCh)
 
 		// Phase 5b: RoleController — 50ms polling, drives ReplicationManager.
 		if replManager != nil {
@@ -590,6 +618,18 @@ func main() {
 	mux.Handle("GET /raft/kv/{key}", infrahttp.NewRaftKVGetHandler(raftNode, raftKVSM, raftAddrMap))
 	mux.Handle("POST /raft/config", infrahttp.NewConfigHandler(raftNode, raftAddrMap))
 
+	// Phase 13 (ADR-022): MVCC endpoints.
+	mvccKVHandler := infrahttp.NewMVCCKVHandler(raftRegistry, raftMVCCSM, nodeID, raftAddrMap)
+	casHandler := infrahttp.NewCASHandler(raftRegistry, raftMVCCSM, nodeID, raftAddrMap)
+	mux.Handle("GET /mvcc/kv/{key}", mvccKVHandler)
+	mux.Handle("PUT /mvcc/kv/{key}", casHandler)
+
+	// Phase 14 (ADR-023): CDC SSE stream + status endpoints.
+	cdcHandler := infrahttp.NewCDCHandler(raftChangeLog)
+	mux.Handle("GET /cdc/stream", cdcHandler)
+	mux.Handle("GET /cdc/status", cdcHandler)
+	slog.Info("cdc: SSE stream registered at /cdc/stream")
+
 	// --- HTTP 서버 (HTTP Server) ---------------------------------------------
 	// 명시적 타임아웃은 선택 사항이 아니다.
 	// 타임아웃 없이는 느린 클라이언트가 연결을 무한 점유해 파일 디스크립터를 고갈시킨다.
@@ -660,6 +700,12 @@ func main() {
 		if grpcSrv != nil {
 			grpcSrv.Stop()
 			slog.Info("grpc server stopped")
+		}
+
+		// Step 3.5: CDC ChangeLog close — unblocks all SSE subscriber goroutines. (INV-CDC5)
+		if raftChangeLog != nil {
+			raftChangeLog.Close()
+			slog.Info("cdc: ChangeLog closed")
 		}
 
 		// Step 4: jobCh를 닫고 모든 worker가 드레인·종료할 때까지 대기.

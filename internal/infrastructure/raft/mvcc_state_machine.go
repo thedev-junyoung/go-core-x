@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ErrSnapshotDisplaced is returned by WaitForIndex when a snapshot install
@@ -56,6 +57,11 @@ const snapshotMVCCKey = "\x00__mvcc_state__"
 //     fast-path; it is stored only while mu is held (write lock) so that
 //     TakeSnapshot sees a consistent (versions, lastApplied) pair.
 //   - waitMu protects waiters.
+//
+// CDC integration (ADR-023):
+//   - changeLog is optional (nil = CDC disabled; backward-compatible).
+//   - Publish is called after notifyWaiters so HTTP handlers are unblocked first.
+//   - CAS conflict path does NOT call Publish (INV-CDC1).
 type MVCCStateMachine struct {
 	mu       sync.RWMutex
 	versions map[string][]MVCCVersion // key → versions, oldest first
@@ -74,6 +80,11 @@ type MVCCStateMachine struct {
 	waitMu      sync.Mutex
 	waiters     map[int64][]chan error // buffered(1); nil=applied, non-nil=error
 	lastApplied atomic.Int64
+
+	// changeLog is the CDC event bus. nil means CDC is disabled. (ADR-023)
+	// Injected via SetChangeLog after construction to keep NewMVCCStateMachine
+	// backward-compatible with callers that do not need CDC.
+	changeLog *ChangeLog
 }
 
 // NewMVCCStateMachine creates an MVCCStateMachine.
@@ -90,6 +101,13 @@ func NewMVCCStateMachine(_ KVDurableStore, retention int) *MVCCStateMachine {
 		waiters:         make(map[int64][]chan error),
 		retention:       retention,
 	}
+}
+
+// SetChangeLog injects the CDC event bus. Call before Run(). (ADR-023)
+// Passing nil disables CDC (default behavior — backward-compatible).
+func (sm *MVCCStateMachine) SetChangeLog(cl *ChangeLog) {
+	// No lock needed: called before Run() so no concurrent access.
+	sm.changeLog = cl
 }
 
 // Run consumes entries from applyCh until ctx is cancelled.
@@ -165,7 +183,22 @@ func (sm *MVCCStateMachine) apply(entry LogEntry) {
 	slog.Debug("mvcc: applied", "op", cmd.Op, "key", cmd.Key,
 		"version", nextVer, "index", entry.Index)
 
+	// notifyWaiters first: HTTP handlers waiting on WaitForIndex are unblocked
+	// before CDC publish, which may encounter slow consumers. (ADR-023)
 	sm.notifyWaiters(entry.Index, nil)
+
+	// CDC publish: at-least-once, non-blocking. (INV-CDC1, INV-CDC4)
+	// Only called on successful apply — CAS conflicts exit early above.
+	if sm.changeLog != nil {
+		sm.changeLog.Publish(ChangeEvent{
+			Type:      cmd.Op,
+			Key:       cmd.Key,
+			Value:     cmd.Value,
+			Version:   nextVer,
+			Offset:    entry.Index,
+			Timestamp: time.Now(),
+		})
+	}
 }
 
 // gc trims versions[key] so that at most sm.retention versions are kept.
